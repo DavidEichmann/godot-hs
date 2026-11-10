@@ -1,3 +1,5 @@
-packages: godot-sys
+packages:
+  godot-sys
+  godot-low
 
 tests: True
