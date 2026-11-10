@@ -24,10 +24,10 @@ several GB of disk.
 ## Usage
 
 ```sh
-cabal build                      # static libgodot.a, template_debug
-cabal build -f +shared           # shared libgodot.so
-cabal build -f +release          # template_release
-cabal test                       # create and destroy a headless Godot instance
+cabal build all                  # static libgodot.a, template_debug
+cabal build all -f +shared       # shared libgodot.so
+cabal build all -f +release      # template_release
+cabal test all                   # create and destroy a headless Godot instance
 ```
 
 Depending on `godot-sys` gives your package:

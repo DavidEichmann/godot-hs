@@ -37,6 +37,7 @@ tested-with:        GHC == 9.12.2
 source-repository head
   type:     git
   location: .
+  subdir:   godot-sys
 
 flag shared
   description: Build Godot as a shared library (libgodot.so) instead of a static one (libgodot.a).
