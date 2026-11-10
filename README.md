@@ -50,8 +50,7 @@ Depending on `godot-sys` gives your package:
 ## Updating Godot
 
 Change `godotTag` and `godotSha256` in `Setup.hs` (the hash is published next
-to the tarball as `godot-<tag>.tar.xz.sha256`), and `godotVersion` in
-`src/Godot/Sys.hs`.
+to the tarball as `godot-<tag>.tar.xz.sha256`).
 
 ## How it works
 

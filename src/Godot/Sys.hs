@@ -11,10 +11,8 @@
 -- @gdextension_interface.json@ are installed with this package and are on the
 -- include path of any C sources in packages that depend on it.
 module Godot.Sys
-  ( -- * Pinned version
-    godotVersion
-    -- * Types
-  , GDExtensionObjectPtr
+  ( -- * Types
+    GDExtensionObjectPtr
   , GDExtensionInitializationFunction
   , GodotInstance
     -- * libgodot API
@@ -30,10 +28,6 @@ import Foreign.Marshal.Alloc (free)
 import Foreign.Marshal.Array (withArray0)
 import Foreign.Ptr (FunPtr, Ptr, nullPtr)
 import Control.Exception (bracket)
-
--- | The Godot version this package builds (see @Setup.hs@).
-godotVersion :: String
-godotVersion = "4.7.2-stable"
 
 -- | Opaque Godot object.
 data GodotInstance

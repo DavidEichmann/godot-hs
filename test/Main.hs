@@ -12,7 +12,6 @@ foreign import ccall "&godot_sys_test_init"
 
 main :: IO ()
 main = do
-  putStrLn ("godot-sys: Godot " ++ godotVersion)
   -- Export templates refuse to start without a project, so give it an empty one.
   tmp <- getTemporaryDirectory
   let project = tmp </> "godot-sys-test-project"
