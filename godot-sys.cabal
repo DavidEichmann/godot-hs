@@ -1,0 +1,85 @@
+cabal-version:      3.0
+name:               godot-sys
+version:            0.1.0.0
+synopsis:           Godot Engine built as a native library (libgodot)
+description:
+  Builds a pinned version of the Godot Engine as a library (@libgodot@)
+  using Godot's own SCons build, and exposes it to Haskell.
+  .
+  The Godot version is pinned in "Setup.hs" (tag, download URL and SHA-256).
+  .
+  Cabal flags:
+  .
+  * @shared@ — build @libgodot.so@ instead of the default static @libgodot.a@.
+  .
+  * @release@ — build the @template_release@ target instead of @template_debug@.
+  .
+  Environment variables (read at build time):
+  .
+  * @GODOT_SYS_SOURCE_DIR@ — use an existing, unpacked Godot source tree
+    instead of downloading the pinned tarball. It must be the pinned version.
+  .
+  * @GODOT_SYS_TARBALL@ — use a local copy of the pinned tarball (still
+    checked against the pinned SHA-256).
+  .
+  * @GODOT_SYS_JOBS@ — number of parallel SCons jobs (default: CPU count).
+  .
+  * @GODOT_SYS_SCONS_FLAGS@ — extra, space-separated SCons arguments.
+license:            MIT
+license-file:       LICENSE
+author:             David Eichmann
+maintainer:         eichmannd@gmail.com
+category:           Game Engine, FFI
+build-type:         Custom
+extra-doc-files:    README.md
+tested-with:        GHC == 9.12.2
+
+source-repository head
+  type:     git
+  location: .
+
+flag shared
+  description: Build Godot as a shared library (libgodot.so) instead of a static one (libgodot.a).
+  default:     False
+  manual:      True
+
+flag release
+  description: Build Godot's template_release target instead of template_debug.
+  default:     False
+  manual:      True
+
+custom-setup
+  setup-depends:
+    , base       >=4.14 && <5
+    , Cabal      >=3.14 && <3.17
+    , directory  >=1.3  && <1.4
+    , filepath   >=1.4  && <1.6
+    , process    >=1.6  && <1.7
+
+common warnings
+  ghc-options: -Wall
+
+library
+  import:           warnings
+  exposed-modules:  Godot.Sys
+  hs-source-dirs:   src
+  build-depends:    base >=4.14 && <5
+  default-language: Haskell2010
+
+  -- Setup.hs adds the Godot library itself (extra-libraries: godot), its
+  -- system dependencies, include-dirs for libgodot.h, and (with +shared) an
+  -- rpath. Those depend on build-time paths, so they cannot be written here.
+
+test-suite godot-sys-test
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Main.hs
+  c-sources:        test/cbits/init.c
+  build-depends:
+    , base       >=4.14 && <5
+    , directory
+    , filepath
+    , godot-sys
+  ghc-options:      -threaded
+  default-language: Haskell2010
