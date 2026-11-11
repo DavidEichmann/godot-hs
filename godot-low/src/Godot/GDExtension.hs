@@ -1,10 +1,10 @@
 -- | Low-level GDExtension bindings to Godot.
 --
--- Re-exports the generated "Godot.Low.Types" and "Godot.Low.Interface", and
+-- Re-exports the generated "Godot.GDExtension.Types" and "Godot.GDExtension.Interface", and
 -- wraps the libgodot entry points from "Godot.Sys" with the generated types.
-module Godot.Low
-  ( module Godot.Low.Types
-  , module Godot.Low.Interface
+module Godot.GDExtension
+  ( module Godot.GDExtension.Types
+  , module Godot.GDExtension.Interface
     -- * Embedding Godot (libgodot)
   , createGodotInstance
   , destroyGodotInstance
@@ -14,8 +14,8 @@ module Godot.Low
 import Foreign.C.String (CString)
 import Foreign.C.Types (CInt)
 import Foreign.Ptr (Ptr, castFunPtr, castPtr)
-import Godot.Low.Interface
-import Godot.Low.Types
+import Godot.GDExtension.Interface
+import Godot.GDExtension.Types
 import Godot.Sys (withGodotArgs)
 import qualified Godot.Sys as Sys
 

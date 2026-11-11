@@ -13,7 +13,7 @@ module Main (main) where
 import Control.Exception (throwIO)
 import Control.Monad (filterM, forM_, unless, when)
 import Data.Char (isSpace)
-import Data.List (isPrefixOf, isSuffixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import Distribution.PackageDescription
   ( BuildInfo (..)
   , GenericPackageDescription
@@ -232,10 +232,14 @@ buildGodot verb lbi = do
       -- Godot's SCons build produces one archive per subsystem (core, scene,
       -- servers, modules, drivers, thirdparty, ...). Merge them all into a
       -- single libgodot.a so dependents only need -lgodot.
-      archives <- (out :) <$> findArchives (src </> "bin" </> "obj")
+      -- Only this configuration's archives: the same tree may also hold
+      -- other targets' builds (e.g. the editor built for extension_api.json).
+      let suffix = dropWhile (/= '.') (takeFileName out) -- .linuxbsd.<target>.<arch>.a
+      archives <- (out :) . filter (suffix `isSuffixOf`) <$> findArchives (src </> "bin" </> "obj")
       mergeArchives verb bdir archives staged
   info verb ("godot-sys: staged " ++ staged)
   stageHeaders src (bdir </> "include")
+  stageExtensionApi lbi (bdir </> "include")
 
 -- | Locate (and if necessary download, verify and unpack) the Godot source.
 obtainSource :: Verbosity -> FilePath -> IO FilePath
@@ -334,6 +338,21 @@ stageHeaders src inc = do
   forM_ files $ \(from, to) -> do
     createDirectoryIfMissing True (takeDirectory (inc </> to))
     copyFile (src </> from) (inc </> to)
+
+-- | Install the vendored extension_api.json (the Godot class API, generated
+-- by scripts/update-extension-api.sh) next to the headers, after checking it
+-- was dumped from the pinned Godot version.
+stageExtensionApi :: LocalBuildInfo -> FilePath -> IO ()
+stageExtensionApi lbi inc = do
+  let src = interpretSymbolicPathLBI lbi (makeSymbolicPath "extension_api.json")
+      -- "4.7.2-stable" appears in the header as "Godot Engine v4.7.2.stable..."
+      expected = "v" ++ map (\c -> if c == '-' then '.' else c) godotTag ++ "."
+  header <- take 4096 <$> readFile src
+  unless (expected `isInfixOf` header) $
+    failWith $
+      src ++ " was not generated from Godot " ++ godotTag
+        ++ "; run scripts/update-extension-api.sh"
+  length header `seq` copyFile src (inc </> "extension_api.json")
 
 --------------------------------------------------------------------------------
 -- Installing

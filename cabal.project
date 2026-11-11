@@ -3,3 +3,7 @@ packages:
   godot-low
 
 tests: True
+
+-- godot-low has ~1000 generated modules; compile them in parallel.
+package godot-low
+  ghc-options: -j

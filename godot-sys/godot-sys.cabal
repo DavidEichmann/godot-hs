@@ -32,6 +32,9 @@ maintainer:         eichmannd@gmail.com
 category:           Game Engine, FFI
 build-type:         Custom
 extra-doc-files:    README.md
+extra-source-files:
+  extension_api.json
+  scripts/update-extension-api.sh
 tested-with:        GHC == 9.12.2
 
 source-repository head

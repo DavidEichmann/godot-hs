@@ -6,11 +6,23 @@
 -- GDExtension bindings from the @gdextension_interface.json@ that the
 -- godot-sys dependency installs next to its C headers:
 --
--- * @Godot.Low.Types@ (an @.hsc@ file, so struct sizes and offsets come
+-- * @Godot.GDExtension.Types@ (an @.hsc@ file, so struct sizes and offsets come
 --   from the real C header via hsc2hs): aliases, handles, enums, structs and
 --   function pointer types with @wrapper@ / @dynamic@ imports.
--- * @Godot.Low.Interface@: a record with every interface function, and
+-- * @Godot.GDExtension.Interface@: a record with every interface function, and
 --   'loadInterface' to fill it in from Godot's @get_proc_address@.
+--
+-- and the Godot class API (@Godot.Api.*@) from the @extension_api.json@ that
+-- godot-sys installs alongside it:
+--
+-- * @Godot.Api.Builtin.Types@ / @Godot.Api.Builtin.\<Name\>@: builtin types
+--   (Vector3, String, Array, ...) and their constructors, methods, operators.
+-- * @Godot.Api.Classes@ / @Godot.Api.Class.\<Name\>@: engine classes (Node,
+--   Node3D, ...), their hierarchy, enums, constants and methods.
+-- * @Godot.Api.GlobalEnums@, @Godot.Api.Utility@: global enums and functions.
+--
+-- The Godot.Api module list depends on the API, so configure adds it to the
+-- library (exposed + autogen modules).
 --
 -- Files are written into the package's autogen directory, and only when
 -- their contents change.
@@ -18,13 +30,22 @@ module Main (main) where
 
 import Control.Monad (filterM, when)
 import Data.Aeson
-import Data.Char (isUpper, toLower, toUpper)
+import Data.Aeson.Types (Parser)
+import Data.Char (isAlphaNum, isSpace, isUpper, toLower, toUpper)
 import Data.List (intercalate, isPrefixOf, isSuffixOf, nub)
+import Data.String (fromString)
+import Distribution.PackageDescription (BuildInfo (..), Library (..), PackageDescription (..))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import qualified Distribution.InstalledPackageInfo as IPI
 import Distribution.Simple
-import Distribution.Simple.BuildPaths (autogenPackageModulesDir)
+import Distribution.Simple.BuildPaths (autogenComponentModulesDir)
+import Distribution.Types.ComponentName (ComponentName (..))
+import Distribution.Types.LibraryName (LibraryName (..))
+import qualified Distribution.Compat.Graph as Graph
+import Distribution.Types.ComponentLocalBuildInfo (ComponentLocalBuildInfo (..))
+import Distribution.Types.ExposedModule (ExposedModule (..))
+import Distribution.Types.LocalBuildInfo (componentNameCLBIs)
 import Distribution.Simple.LocalBuildInfo (LocalBuildInfo (..), interpretSymbolicPathLBI)
 import Distribution.Simple.PackageIndex (lookupPackageName)
 import Distribution.Simple.Setup
@@ -42,7 +63,10 @@ main :: IO ()
 main =
   defaultMainWithHooks
     simpleUserHooks
-      { buildHook = \pd lbi hooks flags -> do
+      { confHook = \args flags -> do
+          lbi <- confHook simpleUserHooks args flags
+          addApiModules lbi
+      , buildHook = \pd lbi hooks flags -> do
           generate (fromFlagOrDefault normal (buildVerbosity flags)) lbi
           buildHook simpleUserHooks pd lbi hooks flags
       , haddockHook = \pd lbi hooks flags -> do
@@ -61,24 +85,88 @@ generate verb lbi = do
   json <- findInterfaceJson lbi
   info verb ("godot-low: generating bindings from " ++ json)
   api <- either (fail . (("godot-low: cannot parse " ++ json ++ ": ") ++)) pure =<< eitherDecodeFileStrict json
-  let outDir = interpretSymbolicPathLBI lbi (autogenPackageModulesDir lbi) </> "Godot" </> "Low"
+  libAutogen <- libraryAutogenDir lbi
+  let outDir = libAutogen </> "Godot" </> "GDExtension"
       env = mkEnv api
   createDirectoryIfMissing True outDir
   w1 <- writeIfChanged (outDir </> "Types.hsc") (genTypes env api)
   w2 <- writeIfChanged (outDir </> "Interface.hs") (genInterface env api)
-  when (w1 || w2) $ notice verb ("godot-low: generated bindings in " ++ outDir)
+  when (w1 || w2) $ notice verb ("godot-low: generated GDExtension bindings in " ++ outDir)
+
+  apiJson <- findGodotSysFile lbi "extension_api.json"
+  info verb ("godot-low: generating Godot API bindings from " ++ apiJson)
+  x <- readExtApi apiJson
+  let aenv = mkAEnv x
+      root = libAutogen
+      file comps = root </> joinPath comps <.> "hs"
+      outputs =
+        [ (["Godot", "Api", "Builtin", "Types"], genBuiltinTypes aenv)
+        , (["Godot", "Api", "Classes"], genClasses aenv)
+        , (["Godot", "Api", "GlobalEnums"], genGlobalEnums aenv x)
+        , (["Godot", "Api", "Utility"], genUtility aenv x)
+        ]
+          ++ [(["Godot", "Api", "Builtin", bcName b], genBuiltinModule aenv b) | b <- Map.elems (aBuiltins aenv)]
+          ++ [(["Godot", "Api", "Class", clName c], genClassModule aenv c) | c <- Map.elems (aClasses aenv)]
+  changed <- fmap or . mapM id $
+    [ do
+        createDirectoryIfMissing True (takeDirectory (file comps))
+        writeIfChanged (file comps) contents
+    | (comps, contents) <- outputs
+    ]
+  when changed $
+    notice verb ("godot-low: generated " ++ show (length outputs) ++ " Godot API modules (" ++ xVersion x ++ ")")
+
+-- | The library component's autogen directory. Generated modules must not go
+-- in the package-wide one, or other components (the test suite) would compile
+-- their own copies instead of using the library.
+libraryAutogenDir :: LocalBuildInfo -> IO FilePath
+libraryAutogenDir lbi = case componentNameCLBIs lbi (CLibName LMainLibName) of
+  clbi : _ -> pure (interpretSymbolicPathLBI lbi (autogenComponentModulesDir lbi clbi))
+  [] -> fail "godot-low: no library component"
+
+readExtApi :: FilePath -> IO ExtApi
+readExtApi path =
+  either (fail . (("godot-low: cannot parse " ++ path ++ ": ") ++)) pure =<< eitherDecodeFileStrict path
+
+-- | Add the generated Godot.Api modules to the library.
+addApiModules :: LocalBuildInfo -> IO LocalBuildInfo
+addApiModules lbi = do
+  x <- readExtApi =<< findGodotSysFile lbi "extension_api.json"
+  let mods = map (fromString . intercalate ".") (apiModuleNames x)
+      addTo l =
+        l
+          { exposedModules = exposedModules l ++ mods
+          , libBuildInfo = (libBuildInfo l) {autogenModules = autogenModules (libBuildInfo l) ++ mods}
+          }
+      pkg = localPkgDescr lbi
+      -- Registration uses the exposed modules recorded in the library's
+      -- ComponentLocalBuildInfo, so update those too.
+      addToClbi clbi = case clbi of
+        LibComponentLocalBuildInfo {} ->
+          clbi {componentExposedModules = componentExposedModules clbi ++ [ExposedModule m Nothing | m <- mods]}
+        _ -> clbi
+  pure
+    lbi
+      { localPkgDescr = pkg {library = fmap addTo (library pkg)}
+      , componentGraph = Graph.fromDistinctList (map addToClbi (Graph.toList (componentGraph lbi)))
+      , componentNameMap = Map.map (map addToClbi) (componentNameMap lbi)
+      }
 
 -- | Locate gdextension_interface.json in the include dirs of godot-sys.
 findInterfaceJson :: LocalBuildInfo -> IO FilePath
-findInterfaceJson lbi = do
+findInterfaceJson lbi = findGodotSysFile lbi "gdextension_interface.json"
+
+-- | Locate a file installed in the include dirs of godot-sys.
+findGodotSysFile :: LocalBuildInfo -> FilePath -> IO FilePath
+findGodotSysFile lbi name = do
   let pkgs = concatMap snd (lookupPackageName (installedPkgs lbi) (mkPackageName "godot-sys"))
-      candidates = nub [d </> "gdextension_interface.json" | p <- pkgs, d <- IPI.includeDirs p]
+      candidates = nub [d </> name | p <- pkgs, d <- IPI.includeDirs p]
   found <- filterM doesFileExist candidates
   case found of
     f : _ -> pure f
     [] ->
       fail $
-        "godot-low: gdextension_interface.json not found in godot-sys include dirs: "
+        "godot-low: " ++ name ++ " not found in godot-sys include dirs: "
           ++ show candidates
 
 writeIfChanged :: FilePath -> String -> IO Bool
@@ -352,7 +440,7 @@ fnDoc f =
     ++ concat [["", "@since " ++ s] | Just s <- [fnSince f]]
 
 --------------------------------------------------------------------------------
--- Godot.Low.Types
+-- Godot.GDExtension.Types
 
 genTypes :: Env -> Api -> String
 genTypes env api =
@@ -374,7 +462,7 @@ genTypes env api =
     , "-- * Structs are records with 'Storable' instances (layout from the C header)."
     , "-- * Function pointer types are 'FunPtr' synonyms, with @wrapX@ (Haskell"
     , "--   function to C function pointer) and @unwrapX@ (call a C function pointer)."
-    , "module Godot.Low.Types where"
+    , "module Godot.GDExtension.Types where"
     , ""
     , "#include <libgodot.h>"
     , ""
@@ -388,7 +476,7 @@ genTypes env api =
     ]
       ++ section "Aliases" (concatMap genAlias (ofKind "alias"))
       ++ section "Handles" (concatMap genHandle (ofKind "handle"))
-      ++ section "Enums" (concatMap genEnum (ofKind "enum"))
+      ++ section "Enums" (concatMap genCEnum (ofKind "enum"))
       ++ section "Structs" (concatMap genStruct (ofKind "struct"))
       ++ section "Function pointer types" (concatMap genFunctionType (ofKind "function"))
   where
@@ -421,7 +509,7 @@ genTypes env api =
                  ++ " of '" ++ p ++ "'."
              ]
 
-    genEnum t =
+    genCEnum t =
       let n = tdName t
        in docs t
             ++ [ "newtype " ++ n ++ " = " ++ n ++ " #{type " ++ n ++ "}"
@@ -491,7 +579,7 @@ genTypes env api =
     argLabel a = "@" ++ fromMaybe "_" (argName a) ++ " :: " ++ argType a ++ "@"
 
 --------------------------------------------------------------------------------
--- Godot.Low.Interface
+-- Godot.GDExtension.Interface
 
 genInterface :: Env -> Api -> String
 genInterface env api =
@@ -505,7 +593,7 @@ genInterface env api =
     , "-- Godot hands a 'GDExtensionInterfaceGetProcAddress' to the extension's"
     , "-- initialization function; 'loadInterface' resolves every function through"
     , "-- it into a 'GDExtensionInterface' record."
-    , "module Godot.Low.Interface"
+    , "module Godot.GDExtension.Interface"
     , "  ( GDExtensionInterface (..)"
     , "  , loadInterface"
     , "  , getProcAddress"
@@ -519,7 +607,7 @@ genInterface env api =
          , "import Data.Int"
          , "import Data.Word"
          , "import Foreign.Ptr"
-         , "import Godot.Low.Types"
+         , "import Godot.GDExtension.Types"
          , ""
          , "-- | All GDExtension interface functions."
          , "data GDExtensionInterface = GDExtensionInterface"
@@ -551,7 +639,7 @@ genInterface env api =
          , ""
          , "resolve :: String -> (FunPtr a -> b) -> GDExtensionInterfaceFunctionPtr -> b"
          , "resolve name unwrap p"
-         , "  | p == nullFunPtr = error (\"Godot.Low.Interface: \" ++ name ++ \" is not provided by this Godot build\")"
+         , "  | p == nullFunPtr = error (\"Godot.GDExtension.Interface: \" ++ name ++ \" is not provided by this Godot build\")"
          , "  | otherwise = unwrap (castFunPtr p)"
          , ""
          ]
@@ -568,3 +656,952 @@ genInterface env api =
           , "  unwrap" ++ n ++ " :: " ++ n ++ " -> " ++ sig
           , ""
           ]
+
+--------------------------------------------------------------------------------
+-- extension_api.json model (the Godot class API)
+
+data ExtApi = ExtApi
+  { xVersion :: String
+  , xSizes :: Map.Map String Int
+  , xOffsets :: Map.Map String [MemberOffset]
+  , xGlobalEnums :: [ApiEnum]
+  , xUtility :: [ApiFn]
+  , xBuiltins :: [BuiltinClass]
+  , xClasses :: [ApiClass]
+  , xSingletons :: [String]
+  -- ^ class names of the engine singletons
+  }
+
+data MemberOffset = MemberOffset {moName :: String, moOffset :: Int, moMeta :: String}
+
+data ApiEnum = ApiEnum
+  { aeName :: String
+  , aeIsBitfield :: Bool
+  , aeValues :: [ApiValue]
+  }
+
+data ApiValue = ApiValue {avName :: String, avValue :: Integer, avDesc :: Maybe String}
+
+data ApiArg = ApiArg {aaName :: String, aaType :: String}
+
+data ApiFn = ApiFn
+  { afName :: String
+  , afReturn :: Maybe String
+  , afVararg :: Bool
+  , afStatic :: Bool
+  , afVirtual :: Bool
+  , afHash :: Maybe Integer
+  , afArgs :: [ApiArg]
+  , afDesc :: Maybe String
+  }
+
+data ApiOperator = ApiOperator
+  { aoName :: String
+  , aoRight :: Maybe String
+  , aoReturn :: String
+  , aoDesc :: Maybe String
+  }
+
+data ApiCtor = ApiCtor {acIndex :: Integer, acArgs :: [ApiArg], acDesc :: Maybe String}
+
+data BuiltinClass = BuiltinClass
+  { bcName :: String
+  , bcEnums :: [ApiEnum]
+  , bcOperators :: [ApiOperator]
+  , bcMethods :: [ApiFn]
+  , bcCtors :: [ApiCtor]
+  , bcHasDestructor :: Bool
+  , bcBrief :: Maybe String
+  , bcDesc :: Maybe String
+  }
+
+data ApiClass = ApiClass
+  { clName :: String
+  , clInherits :: Maybe String
+  , clApiType :: String
+  , clRefcounted :: Bool
+  , clInstantiable :: Bool
+  , clConstants :: [ApiValue]
+  , clEnums :: [ApiEnum]
+  , clMethods :: [ApiFn]
+  , clBrief :: Maybe String
+  , clDesc :: Maybe String
+  }
+
+-- | The build configuration godot-sys builds: single precision, 64-bit.
+buildConfiguration :: String
+buildConfiguration = "float_64"
+
+instance FromJSON ExtApi where
+  parseJSON = withObject "extension_api" $ \o -> do
+    header <- o .: "header"
+    version <- header .: "version_full_name"
+    sizes <- forConfig "builtin_class_sizes" o $ \c -> do
+      xs <- c .: "sizes"
+      Map.fromList <$> mapM (\x -> (,) <$> x .: "name" <*> x .: "size") xs
+    offsets <- forConfig "builtin_class_member_offsets" o $ \c -> do
+      xs <- c .: "classes"
+      Map.fromList <$> mapM (\x -> (,) <$> x .: "name" <*> x .: "members") xs
+    ExtApi version sizes offsets
+      <$> o .: "global_enums"
+      <*> o .: "utility_functions"
+      <*> o .: "builtin_classes"
+      <*> o .: "classes"
+      <*> (o .: "singletons" >>= mapM (.: "type"))
+    where
+      forConfig :: Key -> Object -> (Object -> Parser a) -> Parser a
+      forConfig key o f = do
+        cfgs <- o .: key
+        matches <- filterM (\c -> (== buildConfiguration) <$> c .: "build_configuration") cfgs
+        case matches of
+          c : _ -> f c
+          [] -> fail ("no " ++ buildConfiguration ++ " configuration in " ++ show key)
+
+instance FromJSON MemberOffset where
+  parseJSON = withObject "MemberOffset" $ \o ->
+    MemberOffset <$> o .: "member" <*> o .: "offset" <*> o .: "meta"
+
+instance FromJSON ApiEnum where
+  parseJSON = withObject "ApiEnum" $ \o ->
+    ApiEnum <$> o .: "name" <*> o .:? "is_bitfield" .!= False <*> o .:? "values" .!= []
+
+instance FromJSON ApiValue where
+  parseJSON = withObject "ApiValue" $ \o ->
+    ApiValue <$> o .: "name" <*> o .: "value" <*> o .:? "description"
+
+instance FromJSON ApiArg where
+  parseJSON = withObject "ApiArg" $ \o -> ApiArg <$> o .: "name" <*> o .: "type"
+
+instance FromJSON ApiFn where
+  parseJSON = withObject "ApiFn" $ \o -> do
+    rt <- o .:? "return_type"
+    rv <- o .:? "return_value"
+    rvt <- maybe (pure Nothing) (.:? "type") rv
+    ApiFn
+      <$> o .: "name"
+      <*> pure (maybe rvt Just rt)
+      <*> o .:? "is_vararg" .!= False
+      <*> o .:? "is_static" .!= False
+      <*> o .:? "is_virtual" .!= False
+      <*> o .:? "hash"
+      <*> o .:? "arguments" .!= []
+      <*> o .:? "description"
+
+instance FromJSON ApiOperator where
+  parseJSON = withObject "ApiOperator" $ \o ->
+    ApiOperator <$> o .: "name" <*> o .:? "right_type" <*> o .: "return_type" <*> o .:? "description"
+
+instance FromJSON ApiCtor where
+  parseJSON = withObject "ApiCtor" $ \o ->
+    ApiCtor <$> o .: "index" <*> o .:? "arguments" .!= [] <*> o .:? "description"
+
+instance FromJSON BuiltinClass where
+  parseJSON = withObject "BuiltinClass" $ \o ->
+    BuiltinClass
+      <$> o .: "name"
+      <*> o .:? "enums" .!= []
+      <*> o .:? "operators" .!= []
+      <*> o .:? "methods" .!= []
+      <*> o .:? "constructors" .!= []
+      <*> o .:? "has_destructor" .!= False
+      <*> o .:? "brief_description"
+      <*> o .:? "description"
+
+instance FromJSON ApiClass where
+  parseJSON = withObject "ApiClass" $ \o ->
+    ApiClass
+      <$> o .: "name"
+      <*> o .:? "inherits"
+      <*> o .:? "api_type" .!= "core"
+      <*> o .:? "is_refcounted" .!= False
+      <*> o .:? "is_instantiable" .!= False
+      <*> o .:? "constants" .!= []
+      <*> o .:? "enums" .!= []
+      <*> o .:? "methods" .!= []
+      <*> o .:? "brief_description"
+      <*> o .:? "description"
+
+--------------------------------------------------------------------------------
+-- Godot.Api: environment and naming
+
+-- | Builtins that map to Haskell primitives rather than generated types.
+primitiveBuiltins :: [String]
+primitiveBuiltins = ["Nil", "bool", "int", "float"]
+
+data AEnv = AEnv
+  { aBuiltins :: Map.Map String BuiltinClass
+  , aClasses :: Map.Map String ApiClass
+  , aAllClassNames :: [String]
+  , aGlobalEnums :: Map.Map String String
+  -- ^ JSON name -> Haskell type name
+  , aClassEnums :: [(String, String)]
+  , aBuiltinEnums :: [(String, String)]
+  , aVariantTypes :: Map.Map String Integer
+  -- ^ normalized type name -> GDExtensionVariantType value
+  , aOperators :: Map.Map String Integer
+  -- ^ OP_ name -> GDExtensionVariantOperator value
+  , aSizes :: Map.Map String Int
+  , aOffsets :: Map.Map String [MemberOffset]
+  , aSingletons :: [String]
+  }
+
+-- | Only the classes available in the engine godot-sys builds (no editor).
+coreClasses :: ExtApi -> [ApiClass]
+coreClasses x = [c | c <- xClasses x, clApiType c == "core"]
+
+mkAEnv :: ExtApi -> AEnv
+mkAEnv x =
+  AEnv
+    { aBuiltins = Map.fromList [(bcName b, b) | b <- xBuiltins x, bcName b `notElem` primitiveBuiltins]
+    , aClasses = Map.fromList [(clName c, c) | c <- coreClasses x]
+    , aAllClassNames = map clName (xClasses x)
+    , aGlobalEnums = Map.fromList [(aeName e, globalEnumTypeName x e) | e <- xGlobalEnums x]
+    , aClassEnums = [(clName c, aeName e) | c <- coreClasses x, e <- clEnums c]
+    , aBuiltinEnums = [(bcName b, aeName e) | b <- xBuiltins x, e <- bcEnums b]
+    , aVariantTypes = enumTable "Variant.Type" "TYPE_"
+    , aOperators = enumTable "Variant.Operator" ""
+    , aSizes = xSizes x
+    , aOffsets = xOffsets x
+    , aSingletons = xSingletons x
+    }
+  where
+    enumTable :: String -> String -> Map.Map String Integer
+    enumTable name prefix =
+      Map.fromList
+        [ (normalizeTypeName (drop (length prefix) (avName v)), avValue v)
+        | e <- xGlobalEnums x
+        , aeName e == name
+        , v <- aeValues e
+        ]
+
+normalizeTypeName :: String -> String
+normalizeTypeName = map toUpper . filter (/= '_')
+
+-- | Global enum type names, avoiding clashes with class and builtin names.
+globalEnumTypeName :: ExtApi -> ApiEnum -> String
+globalEnumTypeName x e
+  | n `elem` taken = "Global_" ++ n
+  | otherwise = n
+  where
+    n = map (\c -> if c == '.' then '_' else c) (aeName e)
+    taken = map clName (xClasses x) ++ map (hsBuiltinName . bcName) (xBuiltins x)
+
+hsBuiltinName :: String -> String
+hsBuiltinName "String" = "GString"
+hsBuiltinName n = n
+
+-- | snake_case -> camelCase, keeping a leading underscore.
+camel :: String -> String
+camel ('_' : rest) = '_' : camel rest
+camel s = case splitOn '_' s of
+  [] -> s
+  (w : ws) -> w ++ concatMap cap ws
+  where
+    cap (c : cs) = toUpper c : cs
+    cap [] = "_"
+
+-- | A valid, unused value-level name.
+safeName :: [String] -> String -> String
+safeName used n0 = go base
+  where
+    go n = if n `elem` used then go (n ++ "'") else n
+    base = if n0 `elem` haskellKeywords then n0 ++ "'" else n0
+
+variantTypeExpr :: AEnv -> String -> String
+variantTypeExpr env t
+  | t == "Variant" = "(G.GDExtensionVariantType 0)"
+  | otherwise = case Map.lookup (normalizeTypeName t) (aVariantTypes env) of
+      Just v -> "(G.GDExtensionVariantType " ++ show v ++ ")"
+      Nothing -> error ("godot-low: no variant type for " ++ t)
+
+operatorNames :: Map.Map String String
+operatorNames =
+  Map.fromList
+    [ ("==", "EQUAL"), ("!=", "NOT_EQUAL"), ("<", "LESS"), ("<=", "LESS_EQUAL")
+    , (">", "GREATER"), (">=", "GREATER_EQUAL"), ("+", "ADD"), ("-", "SUBTRACT")
+    , ("*", "MULTIPLY"), ("/", "DIVIDE"), ("unary-", "NEGATE"), ("unary+", "POSITIVE")
+    , ("%", "MODULE"), ("**", "POWER"), ("<<", "SHIFT_LEFT"), (">>", "SHIFT_RIGHT")
+    , ("&", "BIT_AND"), ("|", "BIT_OR"), ("^", "BIT_XOR"), ("~", "BIT_NEGATE")
+    , ("and", "AND"), ("or", "OR"), ("xor", "XOR"), ("not", "NOT"), ("in", "IN")
+    ]
+
+-- | Haskell type for an API type. Class results are 'Maybe' (null objects).
+apiType :: AEnv -> Bool -> String -> String
+apiType env isRet t
+  | '*' `elem` t = "(Ptr ())"
+  | t `elem` ["Nil", "void"] = "()"
+  | t == "bool" = "P.Bool"
+  | t == "int" = "Int64"
+  | t == "float" = "P.Double"
+  | t == "Variant" = "R.Variant"
+  | Just r <- stripPrefix "enum::" t = enumRef r
+  | Just r <- stripPrefix "bitfield::" t = enumRef r
+  | "typedarray::" `isPrefixOf` t = "B.Array"
+  | "typeddictionary::" `isPrefixOf` t = "B.Dictionary"
+  | Map.member t (aBuiltins env) = "B." ++ hsBuiltinName t
+  | Map.member t (aClasses env) = cls t
+  | t `elem` aAllClassNames env = cls "Object"
+  | otherwise = error ("godot-low: unknown API type " ++ show t)
+  where
+    cls c = if isRet then "(P.Maybe C." ++ c ++ ")" else "C." ++ c
+    enumRef r
+      | Just n <- Map.lookup r (aGlobalEnums env) = "E." ++ n
+      | (owner, name) <- splitLastDot r =
+          if (owner, name) `elem` aClassEnums env
+            then "C." ++ owner ++ "_" ++ name
+            else
+              if (owner, name) `elem` aBuiltinEnums env
+                then "B." ++ hsBuiltinName owner ++ "_" ++ name
+                else "Int64"
+
+splitLastDot :: String -> (String, String)
+splitLastDot s = case break (== '.') (reverse s) of
+  (rname, '.' : rowner) -> (reverse rowner, reverse rname)
+  _ -> ("", s)
+
+stripPrefix :: String -> String -> Maybe String
+stripPrefix p s = if p `isPrefixOf` s then Just (drop (length p) s) else Nothing
+
+-- | Module names generated from extension_api.json.
+apiModuleNames :: ExtApi -> [[String]]
+apiModuleNames x =
+  [ ["Godot", "Api", "Builtin", "Types"]
+  , ["Godot", "Api", "Classes"]
+  , ["Godot", "Api", "GlobalEnums"]
+  , ["Godot", "Api", "Utility"]
+  ]
+    ++ [["Godot", "Api", "Builtin", bcName b] | b <- xBuiltins x, bcName b `notElem` primitiveBuiltins]
+    ++ [["Godot", "Api", "Class", clName c] | c <- coreClasses x]
+
+--------------------------------------------------------------------------------
+-- BBCode documentation -> Haddock
+
+-- | Haddock comment lines for a Godot BBCode description.
+bbDoc :: [Maybe String] -> [String]
+bbDoc parts = case concatMap bbBlocks [p | Just p <- parts, not (all isSpace p)] of
+  [] -> []
+  ls -> renderDoc (intercalateBlank ls)
+  where
+    intercalateBlank = intercalate [""]
+
+renderDoc :: [String] -> [String]
+renderDoc [] = []
+renderDoc (l : ls) = ("-- | " ++ l) : [if null x then "--" else "-- " ++ x | x <- ls]
+
+-- | Split into blocks (paragraphs and code blocks), each a list of lines.
+bbBlocks :: String -> [[String]]
+bbBlocks s = case breakOnTag ["[codeblocks]", "[codeblock]"] s of
+  Nothing -> paragraphs s
+  Just (before, tag, rest) ->
+    let close = if tag == "[codeblocks]" then "[/codeblocks]" else "[/codeblock]"
+        (code, after) = breakOnStr close rest
+        code' = case breakOnTag ["[gdscript]"] code of
+          Just (_, _, g) -> fst (breakOnStr "[/gdscript]" g)
+          Nothing -> code
+     in paragraphs before ++ [codeLines code'] ++ bbBlocks (drop (length close) after)
+  where
+    paragraphs t = [[bbInline p] | p <- lines t, not (all isSpace p)]
+    codeLines c = ["> " ++ map (\ch -> if ch == '\t' then ' ' else ch) l | l <- trimBlank (lines c)]
+    trimBlank = reverse . dropWhile (all isSpace) . reverse . dropWhile (all isSpace)
+
+breakOnStr :: String -> String -> (String, String)
+breakOnStr pat = go []
+  where
+    go acc [] = (reverse acc, [])
+    go acc s@(c : cs)
+      | pat `isPrefixOf` s = (reverse acc, s)
+      | otherwise = go (c : acc) cs
+
+breakOnTag :: [String] -> String -> Maybe (String, String, String)
+breakOnTag tags = go []
+  where
+    go _ [] = Nothing
+    go acc s@(c : cs) = case [t | t <- tags, t `isPrefixOf` s] of
+      t : _ -> Just (reverse acc, t, drop (length t) s)
+      [] -> go (c : acc) cs
+
+-- | Inline BBCode to Haddock markup.
+bbInline :: String -> String
+bbInline [] = []
+bbInline ('[' : rest)
+  | (tag, ']' : after) <- break (== ']') rest
+  , not (null tag)
+  , '[' `notElem` tag =
+      case words tag of
+        ["code"] -> let (c, a) = breakOnStr "[/code]" after in "@" ++ escapeHaddock c ++ "@" ++ bbInline (drop 7 a)
+        ["b"] -> "__" ++ bbInline after
+        ["/b"] -> "__" ++ bbInline after
+        ["i"] -> "/" ++ bbInline after
+        ["/i"] -> "/" ++ bbInline after
+        ["kbd"] -> "@" ++ bbInline after
+        ["/kbd"] -> "@" ++ bbInline after
+        ["br"] -> " " ++ bbInline after
+        ["lb"] -> "\\[" ++ bbInline after
+        ["rb"] -> "\\]" ++ bbInline after
+        [kind, ref]
+          | kind `elem` refKinds -> "@" ++ escapeHaddock ref ++ "@" ++ bbInline after
+        [w]
+          | all (\ch -> isAlphaNum ch || ch `elem` ("@._" :: String)) w && startsUpper w ->
+              "@" ++ escapeHaddock w ++ "@" ++ bbInline after
+          | any (`isPrefixOf` w) dropped -> bbInline after
+        _
+          | any (`isPrefixOf` tag) dropped -> bbInline after
+          | otherwise -> "\\[" ++ escapeHaddock tag ++ "\\]" ++ bbInline after
+  where
+    refKinds =
+      ["param", "method", "member", "signal", "constant", "enum", "annotation", "theme_item", "constructor", "operator"]
+    dropped = ["url", "/url", "u", "/u", "s", "/s", "center", "/center", "color", "/color", "font", "/font"]
+bbInline (c : rest) = escapeHaddock [c] ++ bbInline rest
+
+startsUpper :: String -> Bool
+startsUpper (ch : _) = isUpper ch
+startsUpper [] = False
+
+escapeHaddock :: String -> String
+escapeHaddock = concatMap esc
+  where
+    esc '\t' = " "
+    esc c
+      | c `elem` ("\\/'`\"@<>*_#$[]-" :: String) = ['\\', c]
+      | otherwise = [c]
+
+--------------------------------------------------------------------------------
+-- Godot.Api: shared code fragments
+
+apiModuleHeader :: [String] -> [String] -> String -> [String]
+apiModuleHeader pragmas docLines' modName =
+  ["{-# LANGUAGE " ++ p ++ " #-}" | p <- pragmas]
+    ++ ["{-# OPTIONS_GHC -Wno-unused-imports -Wno-deprecations -Wno-orphans #-}", ""]
+    ++ docLines'
+    ++ ["module " ++ modName]
+
+apiImports :: [String]
+apiImports =
+  [ "import qualified Prelude as P"
+  , "import Data.Int (Int32, Int64)"
+  , "import Foreign.Ptr (Ptr)"
+  , "import qualified Foreign.Ptr as F"
+  , "import qualified Godot.GDExtension.Types as G"
+  , "import qualified Godot.Api.Internal as R"
+  ]
+
+generatedNote :: String
+generatedNote = "Generated by godot-low's Setup.hs from @extension_api.json@. Do not edit."
+
+-- | Wrap @body@ (which uses @a0..an@ and @ret@) in argument/return marshalling.
+marshalCall :: [String] -> String -> [String]
+marshalCall argVars body =
+  ["  R.withArg " ++ v ++ " P.$ \\a" ++ show i ++ " ->" | (i, v) <- zip [0 :: Int ..] argVars]
+    ++ ["  R.withRet P.$ \\ret ->", "  " ++ body]
+
+argList :: Int -> String
+argList n = "[" ++ intercalate ", " ["a" ++ show i | i <- [0 .. n - 1]] ++ "]"
+
+argsDoc :: [ApiArg] -> Maybe String -> [Maybe String]
+argsDoc args ret =
+  [ Just ("Arguments: " ++ intercalate ", " ["[code]" ++ aaName a ++ ": " ++ aaType a ++ "[/code]" | a <- args])
+  | not (null args)
+  ]
+    ++ [Just ("Returns [code]" ++ r ++ "[/code].") | Just r <- [ret]]
+
+fnSignature :: AEnv -> [String] -> [ApiArg] -> Maybe String -> String
+fnSignature env pre args ret =
+  intercalate " -> " (pre ++ map (apiType env False . aaType) args ++ ["P.IO " ++ apiType env True (fromMaybe "void" ret)])
+
+--------------------------------------------------------------------------------
+-- Godot.Api.GlobalEnums, enums in general
+
+-- | An enum: newtype over Int64 (how Godot passes enums) with patterns.
+genEnum :: String -> String -> ApiEnum -> [String]
+genEnum typeName patPrefix e =
+  [ "newtype " ++ typeName ++ " = " ++ typeName ++ " Int64"
+  , "  deriving newtype (P.Eq, P.Ord, P.Show, P.Num, P.Enum, P.Real, P.Integral, S.Storable, R.PtrArg, R.PtrRet, R.ToVariant, R.FromVariant"
+      ++ (if aeIsBitfield e then ", Bits.Bits)" else ")")
+  , ""
+  ]
+    ++ concat
+      [ bbDoc [avDesc v]
+          ++ [ "pattern " ++ patPrefix ++ avName v ++ " :: " ++ typeName
+             , "pattern " ++ patPrefix ++ avName v ++ " = " ++ typeName ++ " " ++ lit (avValue v)
+             , ""
+             ]
+      | v <- nubOn avName (aeValues e)
+      ]
+  where
+    lit i = if i < 0 then "(" ++ show i ++ ")" else show i
+
+nubOn :: Eq b => (a -> b) -> [a] -> [a]
+nubOn f = go []
+  where
+    go _ [] = []
+    go seen (y : ys)
+      | f y `elem` seen = go seen ys
+      | otherwise = y : go (f y : seen) ys
+
+genGlobalEnums :: AEnv -> ExtApi -> String
+genGlobalEnums env x =
+  unlines $
+    apiModuleHeader
+      ["DerivingStrategies", "GeneralizedNewtypeDeriving", "PatternSynonyms"]
+      ["-- | Godot's global enums (@\\@GlobalScope@). " ++ generatedNote]
+      "Godot.Api.GlobalEnums where"
+      ++ enumImports
+      ++ concat
+        [ genEnum (aGlobalEnums env Map.! aeName e) (prefix e) e
+        | e <- xGlobalEnums x
+        ]
+  where
+    -- Value names are global in Godot; prefix only those used by several enums.
+    counts = Map.fromListWith (+) [(avName v, 1 :: Int) | e <- xGlobalEnums x, v <- nubOn avName (aeValues e)]
+    prefix e = if any (\v -> Map.findWithDefault 0 (avName v) counts > 1) (aeValues e) then aGlobalEnums env Map.! aeName e ++ "_" else ""
+
+enumImports :: [String]
+enumImports =
+  [ ""
+  , "import qualified Prelude as P"
+  , "import Data.Int (Int64)"
+  , "import qualified Data.Bits as Bits"
+  , "import qualified Foreign.Storable as S"
+  , "import qualified Godot.Api.Internal as R"
+  , ""
+  ]
+
+--------------------------------------------------------------------------------
+-- Godot.Api.Builtin.Types
+
+data BuiltinRepr = Record [MemberOffset] | Opaque
+
+builtinRepr :: AEnv -> BuiltinClass -> BuiltinRepr
+builtinRepr env b = case Map.lookup (bcName b) (aOffsets env) of
+  Just ms | not (bcHasDestructor b), not (null ms) -> Record ms
+  _ -> Opaque
+
+builtinSize :: AEnv -> String -> Int
+builtinSize env n = fromMaybe (error ("godot-low: no size for " ++ n)) (Map.lookup n (aSizes env))
+
+memberType :: String -> String
+memberType meta = case meta of
+  "float" -> "P.Float"
+  "double" -> "P.Double"
+  "int32" -> "Int32"
+  "int64" -> "Int64"
+  other -> hsBuiltinName other
+
+genBuiltinTypes :: AEnv -> String
+genBuiltinTypes env =
+  unlines $
+    apiModuleHeader
+      ["DerivingStrategies", "GeneralizedNewtypeDeriving", "PatternSynonyms", "TypeApplications"]
+      [ "-- | Godot builtin (variant) types. " ++ generatedNote
+      , "--"
+      , "-- Value types with a fixed layout (@Vector3@, @Color@, @Transform3D@, ...) are"
+      , "-- records with 'S.Storable' instances. Others (@GString@ for Godot's @String@,"
+      , "-- @Array@, @Dictionary@, ...) are opaque, owned values that are destroyed when"
+      , "-- garbage collected. Functions on them are in \"Godot.Api.Builtin\".@Name@."
+      ]
+      "Godot.Api.Builtin.Types where"
+      ++ [ ""
+         , "import qualified Prelude as P"
+         , "import Data.Int (Int32, Int64)"
+         , "import qualified Data.Bits as Bits"
+         , "import qualified Foreign.ForeignPtr as FP"
+         , "import qualified Foreign.Ptr as F"
+         , "import qualified Foreign.Storable as S"
+         , "import qualified Godot.GDExtension.Types as G"
+         , "import qualified Godot.Api.Internal as R"
+         , ""
+         ]
+      ++ concatMap genOne (Map.elems (aBuiltins env))
+  where
+    genOne b =
+      let n = hsBuiltinName (bcName b)
+          vt = variantTypeExpr env (bcName b)
+          size = builtinSize env (bcName b)
+          ctor0 = "ctor0_" ++ n
+       in bbDoc [bcBrief b, bcDesc b]
+            ++ ( case builtinRepr env b of
+                   Record ms ->
+                     let field m = lowerFirst n ++ "_" ++ moName m
+                      in [ "data " ++ n ++ " = " ++ n ]
+                           ++ [ "  " ++ (if i == 0 then "{ " else ", ") ++ field m ++ " :: !" ++ memberType (moMeta m)
+                              | (i, m) <- zip [0 :: Int ..] ms
+                              ]
+                           ++ [ "  }"
+                              , "  deriving stock (P.Eq, P.Show)"
+                              , ""
+                              , "instance S.Storable " ++ n ++ " where"
+                              , "  sizeOf _ = " ++ show size
+                              , "  alignment _ = 4"
+                              , "  peek p ="
+                              , "    P.pure " ++ n
+                              ]
+                           ++ ["      P.<*> S.peekByteOff p " ++ show (moOffset m) | m <- ms]
+                           ++ ["  poke p v = do"]
+                           ++ ["    S.pokeByteOff p " ++ show (moOffset m) ++ " (" ++ field m ++ " v)" | m <- ms]
+                           ++ [ ""
+                              , "instance R.PtrArg " ++ n ++ " where withArg = R.storableArg"
+                              , "instance R.PtrRet " ++ n ++ " where withRet = R.storableRet"
+                              , "instance R.Builtin " ++ n ++ " where"
+                              , "  builtinVariantType = " ++ vt
+                              , "  constructWith = R.storableRet"
+                              ]
+                   Opaque ->
+                     [ "newtype " ++ n ++ " = " ++ n ++ " (FP.ForeignPtr " ++ n ++ ")"
+                     , ""
+                     , "instance R.PtrArg " ++ n ++ " where withArg (" ++ n ++ " fp) = R.opaqueArg fp"
+                     , "instance R.PtrRet " ++ n ++ " where"
+                     , "  withRet = R.opaqueRet " ++ show size ++ " " ++ dtor b vt ++ " " ++ ctor0 ++ " " ++ n
+                     , "instance R.Builtin " ++ n ++ " where"
+                     , "  builtinVariantType = " ++ vt
+                     , "  constructWith f = " ++ n ++ " P.<$> R.newOpaque " ++ show size ++ " " ++ dtor b vt ++ " f"
+                     , ""
+                     , "{-# NOINLINE " ++ ctor0 ++ " #-}"
+                     , ctor0 ++ " :: G.GDExtensionUninitializedTypePtr -> F.Ptr G.GDExtensionConstTypePtr -> P.IO ()"
+                     , ctor0 ++ " = R.builtinConstructor " ++ vt ++ " 0"
+                     ]
+               )
+            ++ [ "instance R.ToVariant " ++ n ++ " where toVariant = R.toVariantVia " ++ vt
+               , "instance R.FromVariant " ++ n ++ " where fromVariant = R.fromVariantVia " ++ vt
+               , ""
+               ]
+            ++ concat [genEnum (n ++ "_" ++ aeName e) (n ++ "_") e | e <- bcEnums b]
+    dtor b vt = if bcHasDestructor b then "(P.Just " ++ vt ++ ")" else "P.Nothing"
+
+--------------------------------------------------------------------------------
+-- Godot.Api.Builtin.<Name>
+
+genBuiltinModule :: AEnv -> BuiltinClass -> String
+genBuiltinModule env b =
+  unlines $
+    apiModuleHeader
+      ["FlexibleContexts"]
+      ( bbDoc
+          [ Just ("Constructors, methods and operators of the Godot builtin type [code]" ++ bcName b ++ "[/code] (" ++ "[code]Godot.Api.Builtin.Types." ++ n ++ "[/code]).")
+          , bcBrief b
+          ]
+      )
+      ("Godot.Api.Builtin." ++ bcName b ++ " where")
+      ++ [""]
+      ++ apiImports
+      ++ ["import qualified Godot.Api.Builtin.Types as B", "import qualified Godot.Api.Classes as C", "import qualified Godot.Api.GlobalEnums as E", ""]
+      ++ concat ctors
+      ++ concat methods
+      ++ concat ops
+  where
+    n = hsBuiltinName (bcName b)
+    vt = variantTypeExpr env (bcName b)
+    self = "B." ++ n
+    (ctorNames, ctors) = unzip' (foldl genCtor ([], []) (bcCtors b))
+    (methodNames, methods) = unzip' (foldl genMethod (ctorNames, []) [m | m <- bcMethods b])
+    (_, ops) = unzip' (foldl genOp (methodNames, []) (zip [0 :: Int ..] (bcOperators b)))
+    unzip' (used, chunks) = (used, reverse chunks)
+
+    genCtor (used, acc) c =
+      let base =
+            if null (acArgs c)
+              then "new"
+              else "newFrom" ++ concatMap (pascalType . aaType) (acArgs c)
+          name = safeName used base
+          cname = "ctor_" ++ show (acIndex c)
+          k = length (acArgs c)
+          chunk =
+            bbDoc ([acDesc c] ++ argsDoc (acArgs c) Nothing)
+              ++ [ name ++ " :: " ++ fnSignature env [] (acArgs c) (Just (bcName b))
+                 , name ++ " " ++ unwords ["x" ++ show i | i <- [0 .. k - 1]] ++ " ="
+                 ]
+              ++ ["  R.withArg x" ++ show i ++ " P.$ \\a" ++ show i ++ " ->" | i <- [0 .. k - 1]]
+              ++ [ "  R.constructWith P.$ \\p -> R.withArgs " ++ argList k ++ " (" ++ cname ++ " (G.GDExtensionUninitializedTypePtr p))"
+                 , ""
+                 , "{-# NOINLINE " ++ cname ++ " #-}"
+                 , cname ++ " :: G.GDExtensionUninitializedTypePtr -> F.Ptr G.GDExtensionConstTypePtr -> P.IO ()"
+                 , cname ++ " = R.builtinConstructor " ++ vt ++ " " ++ show (acIndex c)
+                 , ""
+                 ]
+       in (name : used, chunk : acc)
+
+    genMethod (used, acc) m =
+      let name = safeName used (camel (afName m))
+          cache = "bm_" ++ name'
+          name' = filter (/= '\'') name ++ show (length acc)
+          k = length (afArgs m)
+          selfArg = if afStatic m then [] else [self]
+          xs = ["x" ++ show i | i <- [0 .. k - 1]]
+          selfPtr = if afStatic m then "F.nullPtr" else "s"
+          sig
+            | afVararg m = intercalate " -> " (selfArg ++ ["[R.Variant]", "P.IO " ++ apiType env True (fromMaybe "void" (afReturn m))])
+            | otherwise = fnSignature env selfArg (afArgs m) (afReturn m)
+          body
+            | afVararg m =
+                [ name ++ " " ++ unwords (["self" | not (afStatic m)] ++ ["args"]) ++ " ="
+                ]
+                  ++ ["  R.withArg self P.$ \\s ->" | not (afStatic m)]
+                  ++ [ "  R.withRet P.$ \\ret ->"
+                     , "  R.callBuiltinVararg " ++ cache ++ " " ++ selfPtr ++ " args ret"
+                     ]
+            | otherwise =
+                [name ++ " " ++ unwords (["self" | not (afStatic m)] ++ xs) ++ " ="]
+                  ++ ["  R.withArg self P.$ \\s ->" | not (afStatic m)]
+                  ++ marshalCall xs ("R.callBuiltin " ++ cache ++ " " ++ selfPtr ++ " " ++ argList k ++ " ret")
+          chunk =
+            bbDoc ([afDesc m] ++ argsDoc (afArgs m) (afReturn m) ++ [Just "Vararg: pass every argument as a [code]Variant[/code]." | afVararg m])
+              ++ [name ++ " :: " ++ sig]
+              ++ body
+              ++ [ ""
+                 , "{-# NOINLINE " ++ cache ++ " #-}"
+                 , cache ++ " :: R.BuiltinMethod"
+                 , cache ++ " = R.builtinMethod " ++ vt ++ " " ++ show (afName m) ++ " " ++ show (fromMaybe 0 (afHash m))
+                 , ""
+                 ]
+       in (name : used, chunk : acc)
+
+    genOp (used, acc) (i, o) =
+      let opName = fromMaybe (error ("godot-low: unknown operator " ++ aoName o)) (Map.lookup (aoName o) operatorNames)
+          opValue = fromMaybe (error ("godot-low: no OP_" ++ opName)) (Map.lookup (normalizeTypeName ("OP_" ++ opName)) (aOperators env))
+          name = safeName used ("op" ++ pascal (map toLower opName) ++ maybe "" pascalType (aoRight o))
+          cache = "op_" ++ show i
+          rightVt = maybe "(G.GDExtensionVariantType 0)" (variantTypeExpr env . operandType) (aoRight o)
+          args = [ApiArg "right" r | Just r <- [aoRight o]]
+          chunk =
+            bbDoc ([aoDesc o] ++ [Just ("Operator [code]" ++ aoName o ++ "[/code].")])
+              ++ [ name ++ " :: " ++ fnSignature env [self] args (Just (aoReturn o))
+                 , name ++ " self" ++ (if null args then "" else " x0") ++ " ="
+                 , "  R.withArg self P.$ \\s ->"
+                 ]
+              ++ ["  R.withArg x0 P.$ \\a0 ->" | not (null args)]
+              ++ [ "  R.withRet P.$ \\ret ->"
+                 , "  R.callOperator " ++ cache ++ " s " ++ (if null args then "F.nullPtr" else "a0") ++ " ret"
+                 , ""
+                 , "{-# NOINLINE " ++ cache ++ " #-}"
+                 , cache ++ " :: G.GDExtensionConstTypePtr -> G.GDExtensionConstTypePtr -> G.GDExtensionTypePtr -> P.IO ()"
+                 , cache ++ " = R.operatorEvaluator (G.GDExtensionVariantOperator " ++ show opValue ++ ") " ++ vt ++ " " ++ rightVt
+                 , ""
+                 ]
+       in (name : used, chunk : acc)
+
+    operandType t
+      | t `elem` aAllClassNames env = "Object"
+      | otherwise = case t of
+          "bool" -> "BOOL"
+          "int" -> "INT"
+          "float" -> "FLOAT"
+          _ -> t
+
+-- | Type name as a PascalCase name component (for overload names).
+pascalType :: String -> String
+pascalType t = case t of
+  "bool" -> "Bool"
+  "int" -> "Int"
+  "float" -> "Float"
+  _ -> concatMap cap (splitOn '_' (map (\c -> if isAlphaNum c then c else '_') (afterColons t)))
+  where
+    cap (c : cs) = toUpper c : cs
+    cap [] = []
+    afterColons s = case breakOnStr "::" s of
+      (_, ':' : ':' : r) -> r
+      _ -> s
+
+--------------------------------------------------------------------------------
+-- Godot.Api.Classes
+
+classAncestors :: AEnv -> ApiClass -> [String]
+classAncestors env c = clName c : maybe [] up (clInherits c)
+  where
+    up p = case Map.lookup p (aClasses env) of
+      Just pc -> classAncestors env pc
+      Nothing -> []
+
+genClasses :: AEnv -> String
+genClasses env =
+  unlines $
+    apiModuleHeader
+      ["DerivingStrategies", "GeneralizedNewtypeDeriving", "MultiParamTypeClasses", "PatternSynonyms"]
+      [ "-- | Godot engine classes. " ++ generatedNote
+      , "--"
+      , "-- Each class is a handle to a Godot object. @'R.Inherits' a b@ holds when"
+      , "-- @a@ is @b@ or a subclass, so methods of @b@ (in \"Godot.Api.Class\".@b@)"
+      , "-- accept an @a@; use 'R.upcast' to convert explicitly and 'R.cast' to"
+      , "-- downcast. Class enums are named @Class_Enum@ with patterns"
+      , "-- @Class_VALUE@."
+      ]
+      "Godot.Api.Classes where"
+      ++ [ ""
+         , "import qualified Prelude as P"
+         , "import Data.Int (Int64)"
+         , "import qualified Data.Bits as Bits"
+         , "import qualified Foreign.Storable as S"
+         , "import qualified Godot.GDExtension.Types as G"
+         , "import qualified Godot.Api.Internal as R"
+         , ""
+         ]
+      ++ concatMap genOne (Map.elems (aClasses env))
+  where
+    refNote =
+      "[i]RefCounted:[/i] these bindings do not manage references. Objects returned by "
+        ++ "methods or created with [code]construct[/code] carry a reference you must release "
+        ++ "with [code]RefCounted.unreference[/code]."
+    genOne c =
+      let n = clName c
+          obj = "(G.GDExtensionVariantType " ++ show (aVariantTypes env Map.! "OBJECT") ++ ")"
+       in bbDoc ([clBrief c, clDesc c] ++ [Just refNote | clRefcounted c])
+            ++ [ "newtype " ++ n ++ " = " ++ n ++ " G.GDExtensionObjectPtr"
+               , "  deriving stock (P.Show)"
+               , "  deriving newtype (P.Eq, P.Ord)"
+               , ""
+               , "instance R.GodotClass " ++ n ++ " where"
+               , "  godotClassName = " ++ show n
+               , "  toObjectPtr (" ++ n ++ " p) = p"
+               , "  unsafeFromObjectPtr = " ++ n
+               , "instance R.PtrArg " ++ n ++ " where withArg = R.objectArg"
+               , "instance R.ToVariant " ++ n ++ " where toVariant = R.toVariantVia " ++ obj
+               ]
+            ++ ["instance R.Inherits " ++ n ++ " " ++ a | a <- classAncestors env c]
+            ++ [""]
+            ++ concat [genEnum (n ++ "_" ++ aeName e) (n ++ "_") e | e <- clEnums c]
+
+--------------------------------------------------------------------------------
+-- Godot.Api.Class.<Name>
+
+genClassModule :: AEnv -> ApiClass -> String
+genClassModule env c =
+  unlines $
+    apiModuleHeader
+      ["FlexibleContexts", "PatternSynonyms", "TypeApplications"]
+      ( bbDoc
+          ( Just ("Methods of the Godot class [code]" ++ n ++ "[/code] ([code]Godot.Api.Classes." ++ n ++ "[/code])" ++ inheritsNote ++ ".")
+              : [clBrief c, clDesc c]
+          )
+      )
+      ("Godot.Api.Class." ++ n)
+      ++ ["  ( " ++ intercalate "\n  , " exports ++ "\n  ) where" | not (null exports)]
+      ++ ["  where" | null exports]
+      ++ [""]
+      ++ apiImports
+      ++ ["import qualified Godot.Api.Builtin.Types as B", "import qualified Godot.Api.Classes as C", "import qualified Godot.Api.GlobalEnums as E", ""]
+      ++ concat extras
+      ++ concat constants
+      ++ concat methodChunks
+  where
+    n = clName c
+    inheritsNote = maybe "" (\p -> ", which inherits [code]" ++ p ++ "[/code]") (clInherits c)
+    methods = [m | m <- clMethods c, not (afVirtual m)]
+    -- Extra helpers: construct (instantiable classes), singleton.
+    (extraNames, extras) =
+      unzip $
+        [ ( "construct"
+          , [ "-- | Create a new @" ++ n ++ "@ (see 'R.construct')."
+            , "construct :: P.IO C." ++ n
+            , "construct = R.construct @C." ++ n
+            , ""
+            ]
+          )
+        | clInstantiable c
+        , "construct" `notElem` methodBaseNames
+        ]
+          ++ [ ( "singleton"
+               , [ "-- | The @" ++ n ++ "@ singleton (see 'R.singleton')."
+                 , "singleton :: P.IO C." ++ n
+                 , "singleton = R.singleton @C." ++ n
+                 , ""
+                 ]
+               )
+             | isSingletonClass
+             , "singleton" `notElem` methodBaseNames
+             ]
+    isSingletonClass = n `elem` singletonClassNames
+    singletonClassNames = aSingletons env
+    methodBaseNames = map (camel . afName) methods
+    constants =
+      [ bbDoc [avDesc v]
+          ++ [ "pattern " ++ avName v ++ " :: Int64"
+             , "pattern " ++ avName v ++ " = " ++ (if avValue v < 0 then "(" ++ show (avValue v) ++ ")" else show (avValue v))
+             , ""
+             ]
+      | v <- validConstants
+      ]
+    validConstants = [v | v <- nubOn avName (clConstants c), startsUpper (avName v)]
+    (methodNames, methodChunks) =
+      let (used, chunks) = foldl step (extraNames, []) methods
+       in (take (length methods) used, reverse chunks)
+    step (used, acc) m =
+      let name = safeName used (camel (afName m))
+       in (name : used, genClassMethod env c m name (length acc) : acc)
+    exports =
+      extraNames
+        ++ ["pattern " ++ avName v | v <- validConstants]
+        ++ reverse methodNames
+
+genClassMethod :: AEnv -> ApiClass -> ApiFn -> String -> Int -> [String]
+genClassMethod env c m name idx =
+  bbDoc ([afDesc m] ++ argsDoc (afArgs m) (afReturn m) ++ notes)
+    ++ [name ++ " :: " ++ sig]
+    ++ body
+    ++ [ ""
+       , "{-# NOINLINE " ++ cache ++ " #-}"
+       , cache ++ " :: G.GDExtensionMethodBindPtr"
+       , cache ++ " = R.methodBind " ++ show (clName c) ++ " " ++ show (afName m) ++ " " ++ show (fromMaybe 0 (afHash m))
+       , ""
+       ]
+  where
+    cache = "mb_" ++ show idx
+    k = length (afArgs m)
+    xs = ["x" ++ show i | i <- [0 .. k - 1]]
+    selfTy = if afStatic m then [] else ["self"]
+    ctx = if afStatic m then "" else "R.Inherits self C." ++ clName c ++ " => "
+    obj = if afStatic m then "R.nullObjectPtr" else "(R.toObjectPtr self)"
+    notes =
+      [Just "Vararg: pass every argument (including the fixed ones above) as a [code]Variant[/code]." | afVararg m]
+        ++ [Just "Static method." | afStatic m]
+    sig
+      | afVararg m = ctx ++ intercalate " -> " (selfTy ++ ["[R.Variant]", "P.IO R.Variant"])
+      | otherwise = ctx ++ fnSignature env selfTy (afArgs m) (afReturn m)
+    body
+      | afVararg m =
+          [ name ++ " " ++ unwords (selfTy ++ ["args"]) ++ " ="
+          , "  R.varargCall " ++ cache ++ " " ++ obj ++ " args"
+          ]
+      | otherwise =
+          [name ++ " " ++ unwords (selfTy ++ xs) ++ " ="]
+            ++ marshalCall xs ("R.ptrcall " ++ cache ++ " " ++ obj ++ " " ++ argList k ++ " ret")
+
+--------------------------------------------------------------------------------
+-- Godot.Api.Utility
+
+genUtility :: AEnv -> ExtApi -> String
+genUtility env x =
+  unlines $
+    apiModuleHeader
+      []
+      [ "-- | Godot's global utility functions (@\\@GlobalScope@: @sin@, @print@, ...)."
+      , "-- " ++ generatedNote
+      , "--"
+      , "-- Import qualified: many names overlap with the Prelude."
+      ]
+      "Godot.Api.Utility where"
+      ++ [""]
+      ++ apiImports
+      ++ ["import qualified Godot.Api.Builtin.Types as B", "import qualified Godot.Api.Classes as C", "import qualified Godot.Api.GlobalEnums as E", ""]
+      ++ concat (reverse chunks)
+  where
+    (_, chunks) = foldl step ([], []) (zip [0 :: Int ..] (xUtility x))
+    step (used, acc) (i, f) =
+      let name = safeName used (camel (afName f))
+          cache = "uf_" ++ show i
+          k = length (afArgs f)
+          xs = ["x" ++ show j | j <- [0 .. k - 1]]
+          sig
+            | afVararg f = "[R.Variant] -> P.IO " ++ apiType env True (fromMaybe "void" (afReturn f))
+            | otherwise = fnSignature env [] (afArgs f) (afReturn f)
+          body
+            | afVararg f = [name ++ " args =", "  R.withRet P.$ \\ret ->", "  R.callUtilityVararg " ++ cache ++ " args ret"]
+            | otherwise = [name ++ " " ++ unwords xs ++ " ="] ++ marshalCall xs ("R.callUtility " ++ cache ++ " " ++ argList k ++ " ret")
+          chunk =
+            bbDoc ([afDesc f] ++ argsDoc (afArgs f) (afReturn f) ++ [Just "Vararg: pass every argument as a [code]Variant[/code]." | afVararg f])
+              ++ [name ++ " :: " ++ sig]
+              ++ body
+              ++ [ ""
+                 , "{-# NOINLINE " ++ cache ++ " #-}"
+                 , cache ++ " :: R.UtilityFunction"
+                 , cache ++ " = R.utilityFunction " ++ show (afName f) ++ " " ++ show (fromMaybe 0 (afHash f))
+                 , ""
+                 ]
+       in (name : used, chunk : acc)

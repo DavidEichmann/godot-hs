@@ -33,8 +33,9 @@ cabal test all                   # create and destroy a headless Godot instance
 Depending on `godot-sys` gives your package:
 
 - `-lgodot` (plus `stdc++`, `m`, `pthread`, `dl`, `rt`, `atomic` when static),
-- `libgodot.h`, `core/extension/gdextension_interface.gen.h` and
-  `gdextension_interface.json` on the include path,
+- `libgodot.h`, `core/extension/gdextension_interface.gen.h`,
+  `gdextension_interface.json` and `extension_api.json` (the engine class
+  API) on the include path,
 - the `Godot.Sys` module with `libgodotCreateGodotInstance` and
   `libgodotDestroyGodotInstance`.
 
@@ -49,8 +50,22 @@ Depending on `godot-sys` gives your package:
 
 ## Updating Godot
 
-Change `godotTag` and `godotSha256` in `Setup.hs` (the hash is published next
-to the tarball as `godot-<tag>.tar.xz.sha256`).
+1. Change `godotTag` and `godotSha256` in `Setup.hs` (the hash is published
+   next to the tarball as `godot-<tag>.tar.xz.sha256`).
+2. Run `scripts/update-extension-api.sh` and commit the new
+   `extension_api.json`. The build refuses an `extension_api.json` whose
+   version doesn't match `godotTag`.
+
+## extension_api.json
+
+The engine API description (classes, builtin types, utility functions, with
+documentation) is only produced by an *editor* build of Godot
+(`--dump-extension-api`), while this package builds the export-template
+engine. So it is vendored: `scripts/update-extension-api.sh` builds the editor
+from the same pinned, hash-checked source and dumps the API. Set
+`GODOT_SOURCE_DIR` to reuse an existing source tree; the static-library build
+only merges archives for its own target, so the editor build can share the
+tree.
 
 ## How it works
 
