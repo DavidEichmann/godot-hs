@@ -99,7 +99,18 @@ withGodotArgs ["app", "--headless", "--path", projectDir] $ \argc argv -> do
   destroyGodotInstance instPtr
 ```
 
-See [test/Main.hs](test/Main.hs) for a complete program.
+See [test/Main.hs](test/Main.hs) for a complete program, and
+[example/Main.hs](example/Main.hs) for a minimal "hello world" UI that opens
+a window with a centred `Label`:
+
+```sh
+cabal run godot-low-example
+```
+
+libgodot is an export template and needs a project to start, so the example
+writes a throwaway one (just `project.godot` and an empty main scene) to the
+temporary directory; the UI itself is created at runtime through
+`Godot.Api`. For building UIs, see [godot-imui](../godot-imui).
 
 ## How generation works
 

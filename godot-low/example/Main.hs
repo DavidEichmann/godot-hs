@@ -49,6 +49,12 @@ main = do
       , "config/name=\"godot-low example\""
       , "run/main_scene=\"res://main.tscn\""
       , ""
+      , -- The OpenGL renderer renders on the GPU that drives the desktop.
+        -- (Godot's default Vulkan renderer prefers a discrete GPU, which
+        -- can freeze the desktop on hybrid graphics laptops.)
+        "[rendering]"
+      , "renderer/rendering_method=\"gl_compatibility\""
+      , ""
       , "[display]"
       , "window/size/viewport_width=640"
       , "window/size/viewport_height=360"

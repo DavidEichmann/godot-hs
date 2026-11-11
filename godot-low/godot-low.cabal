@@ -66,6 +66,19 @@ library
     , godot-sys  ==0.1.*
   default-language: Haskell2010
 
+-- A hello world UI: cabal run godot-low-example
+executable godot-low-example
+  import:           warnings
+  main-is:          Main.hs
+  hs-source-dirs:   example
+  build-depends:
+    , base       >=4.14 && <5
+    , directory
+    , filepath
+    , godot-low
+  ghc-options:      -threaded
+  default-language: Haskell2010
+
 test-suite godot-low-test
   import:           warnings
   type:             exitcode-stdio-1.0
