@@ -521,6 +521,16 @@ createProject title (width, height) = do
       , "file_logging/enable_file_logging=false"
       , "file_logging/enable_file_logging.pc=false"
       , ""
+      , "[rendering]"
+      , -- Godot's OpenGL renderer, which is plenty for 2D UI. It renders on
+        -- the GPU that drives the desktop. Godot's default Vulkan renderer
+        -- prefers a discrete GPU, and on hybrid graphics laptops (desktop
+        -- on the integrated GPU) presenting its frames across GPUs can
+        -- freeze the whole X server, especially while the window is moved
+        -- or resized. It also starts faster and uses less memory.
+        "renderer/rendering_method=\"gl_compatibility\""
+      , "renderer/rendering_method.mobile=\"gl_compatibility\""
+      , ""
       , "[display]"
       , -- Dialogs and menus are windows of their own.
         "window/subwindows/embed_subwindows=false"

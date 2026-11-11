@@ -182,8 +182,10 @@ while their block runs and synced with the popup or tree afterwards.
 `runUI` starts Godot inside your process (libgodot from
 [godot-sys](../godot-sys)). Godot can only run a project, so an empty one is
 written to a temporary directory and removed on exit. Godot is started
-without audio and in its low processor mode, in which it only redraws when
-something changed. Your function is still called for every frame (about 100
+with its OpenGL ("Compatibility") renderer, which renders on the GPU that
+drives the desktop (on a hybrid graphics laptop, presenting frames rendered
+on the discrete GPU can freeze the desktop), without audio, and in its low
+processor mode, in which it only redraws when something changed. Your function is still called for every frame (about 100
 times a second when idle), so keep it cheap.
 
 ## Other controls
