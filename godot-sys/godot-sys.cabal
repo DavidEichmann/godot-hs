@@ -16,8 +16,13 @@ description:
   .
   Environment variables (read at build time):
   .
+  * @GODOT_SYS_CACHE_DIR@ — where the Godot source and builds are kept, so
+    that other build directories (e.g. the Haskell Language Server's) reuse
+    them (default: @~/.cache/godot-sys@).
+  .
   * @GODOT_SYS_SOURCE_DIR@ — use an existing, unpacked Godot source tree
     instead of downloading the pinned tarball. It must be the pinned version.
+    Builds from it are not cached.
   .
   * @GODOT_SYS_TARBALL@ — use a local copy of the pinned tarball (still
     checked against the pinned SHA-256).

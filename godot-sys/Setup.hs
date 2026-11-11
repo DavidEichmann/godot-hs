@@ -5,12 +5,15 @@
 --   library's build info, so that dependents link against it.
 -- * build: fetches the pinned Godot source, builds it with SCons as a static
 --   or shared library, and stages @libgodot.{a,so}@ and the C headers in the
---   component build directory.
+--   component build directory. The source, SCons objects and finished
+--   library are kept in a per-user cache (see 'cacheDir'), so that other
+--   build directories (HLS's, git worktrees, other projects) reuse them
+--   instead of building Godot again.
 -- * copy/install: copies those artefacts next to the installed Haskell
 --   library.
 module Main (main) where
 
-import Control.Exception (throwIO)
+import Control.Exception (IOException, throwIO, try)
 import Control.Monad (filterM, forM_, unless, when)
 import Data.Char (isSpace)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
@@ -48,10 +51,12 @@ import Distribution.Simple.Utils (info, notice)
 import Distribution.Utils.Path (getSymbolicPath, makeSymbolicPath)
 import Distribution.Verbosity (Verbosity, normal)
 import GHC.Conc (getNumProcessors)
+import GHC.IO.Handle.Lock (LockMode (..), hLock, hTryLock)
 import System.Directory
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath
+import System.IO (IOMode (..), withFile)
 import System.Process
 
 --------------------------------------------------------------------------------
@@ -202,7 +207,6 @@ buildGodot verb lbi = do
   bdir <- absBuildDir lbi
   createDirectoryIfMissing True bdir
   let cfg = godotConfig lbi
-  src <- obtainSource verb bdir
   jobs <- maybe (show <$> getNumProcessors) pure =<< lookupEnv "GODOT_SYS_JOBS"
   extra <- maybe [] words <$> lookupEnv "GODOT_SYS_SCONS_FLAGS"
   let sconsArgs =
@@ -216,65 +220,144 @@ buildGodot verb lbi = do
           -- pack lives (--path, --main-pack); export templates disable that
           -- by default. Can be turned back on via GODOT_SYS_SCONS_FLAGS.
         , "disable_path_overrides=no"
-        , "-j" ++ jobs
         ]
           ++ extra
-  notice verb ("godot-sys: building Godot " ++ godotTag ++ " (" ++ unwords sconsArgs ++ ")")
-  run src "scons" sconsArgs
-
-  out <- findGodotOutput src cfg
+      jobsArg = "-j" ++ jobs
+  override <- lookupEnv "GODOT_SYS_SOURCE_DIR"
+  out <- case override of
+    -- A tree of the user's own may have local changes: build it every time,
+    -- and do not cache the result.
+    Just dir -> do
+      ok <- doesFileExist (dir </> "SConstruct")
+      unless ok $ failWith ("GODOT_SYS_SOURCE_DIR=" ++ dir ++ " is not a Godot source tree")
+      src <- makeAbsolute dir
+      let out = bdir </> "godot-sys-out"
+      sconsBuild verb src cfg (sconsArgs ++ [jobsArg]) out
+      pure out
+    Nothing -> do
+      cache <- cacheDir
+      createDirectoryIfMissing True cache
+      digest <- sha256String (unlines sconsArgs)
+      let key = gcTarget cfg ++ "-" ++ map toLowerKind (show (gcKind cfg)) ++ "-" ++ take 12 digest
+          out = cache </> "lib" </> key
+          complete = out </> ".complete"
+      withCacheLock verb cache $ do
+        done <- doesFileExist complete
+        if done
+          then notice verb ("godot-sys: using the cached Godot build in " ++ out)
+          else do
+            src <- obtainSource verb cache bdir
+            removeIfExists out
+            sconsBuild verb src cfg (sconsArgs ++ [jobsArg]) out
+            writeFile complete (unlines sconsArgs)
+      -- The source tree used to live in each build directory.
+      removeIfExists (bdir </> ("godot-" ++ godotTag))
+      removeIfExists (bdir </> ("godot-" ++ godotTag ++ ".tar.xz"))
+      pure out
+  -- Stage a copy (not a link, so that the build directory stays usable if
+  -- the cache is cleared).
   let staged = bdir </> libFileName (gcKind cfg)
   -- Never leave a library of the other kind lying around in the build dir.
   forM_ [Static, Shared] $ \k -> removeIfExists (bdir </> libFileName k)
+  copyFile (out </> libFileName (gcKind cfg)) staged
+  removeIfExists (bdir </> "include")
+  copyTree (out </> "include") (bdir </> "include")
+  info verb ("godot-sys: staged " ++ staged)
+  stageExtensionApi lbi (bdir </> "include")
+  where
+    toLowerKind c = if c >= 'A' && c <= 'Z' then toEnum (fromEnum c + 32) else c
+
+-- | Run SCons in a Godot source tree and put @libgodot.{a,so}@ and the
+-- C headers in the given directory.
+sconsBuild :: Verbosity -> FilePath -> GodotConfig -> [String] -> FilePath -> IO ()
+sconsBuild verb src cfg sconsArgs out = do
+  notice verb ("godot-sys: building Godot " ++ godotTag ++ " (" ++ unwords sconsArgs ++ ")")
+  run src "scons" sconsArgs
+  built <- findGodotOutput src cfg
+  createDirectoryIfMissing True out
+  let lib = out </> libFileName (gcKind cfg)
   case gcKind cfg of
-    Shared -> copyFile out staged
+    Shared -> copyFile built lib
     Static -> do
       -- Godot's SCons build produces one archive per subsystem (core, scene,
       -- servers, modules, drivers, thirdparty, ...). Merge them all into a
       -- single libgodot.a so dependents only need -lgodot.
       -- Only this configuration's archives: the same tree may also hold
       -- other targets' builds (e.g. the editor built for extension_api.json).
-      let suffix = dropWhile (/= '.') (takeFileName out) -- .linuxbsd.<target>.<arch>.a
-      archives <- (out :) . filter (suffix `isSuffixOf`) <$> findArchives (src </> "bin" </> "obj")
-      mergeArchives verb bdir archives staged
-  info verb ("godot-sys: staged " ++ staged)
-  stageHeaders src (bdir </> "include")
-  stageExtensionApi lbi (bdir </> "include")
+      let suffix = dropWhile (/= '.') (takeFileName built) -- .linuxbsd.<target>.<arch>.a
+      archives <- (built :) . filter (suffix `isSuffixOf`) <$> findArchives (src </> "bin" </> "obj")
+      mergeArchives verb out archives lib
+  stageHeaders src (out </> "include")
 
--- | Locate (and if necessary download, verify and unpack) the Godot source.
-obtainSource :: Verbosity -> FilePath -> IO FilePath
-obtainSource verb bdir = do
-  override <- lookupEnv "GODOT_SYS_SOURCE_DIR"
+-- | Where the Godot source, SCons objects and finished libraries are kept:
+-- @$GODOT_SYS_CACHE_DIR@, or @~/.cache/godot-sys@.
+cacheDir :: IO FilePath
+cacheDir = do
+  override <- lookupEnv "GODOT_SYS_CACHE_DIR"
   case override of
-    Just dir -> do
-      ok <- doesFileExist (dir </> "SConstruct")
-      unless ok $ failWith ("GODOT_SYS_SOURCE_DIR=" ++ dir ++ " is not a Godot source tree")
-      makeAbsolute dir
-    Nothing -> do
-      let src = bdir </> ("godot-" ++ godotTag)
-          stamp = src </> ".godot-sys-unpacked"
-      done <- doesFileExist stamp
-      unless done $ do
-        tarball <- obtainTarball verb bdir
-        notice verb ("godot-sys: unpacking " ++ tarball)
-        removeIfExists src
-        createDirectoryIfMissing True src
-        run bdir "tar" ["-xJf", tarball, "-C", src, "--strip-components=1"]
-        writeFile stamp godotSha256
-      pure src
+    Just dir | not (null dir) -> makeAbsolute dir
+    _ -> getXdgDirectory XdgCache "godot-sys"
 
-obtainTarball :: Verbosity -> FilePath -> IO FilePath
-obtainTarball verb bdir = do
+-- | Only one build at a time may use the cache (e.g. HLS and @cabal build@
+-- starting together), since SCons cannot share a tree.
+withCacheLock :: Verbosity -> FilePath -> IO a -> IO a
+withCacheLock verb cache action =
+  withFile (cache </> "lock") ReadWriteMode $ \h -> do
+    free <- hTryLock h ExclusiveLock
+    unless free $ do
+      notice verb ("godot-sys: waiting for another build to finish with " ++ cache)
+      hLock h ExclusiveLock
+    action
+
+-- | Locate (and if necessary download, verify and unpack) the Godot source
+-- in the cache. A tree left in the build directory by an older godot-sys,
+-- which kept it there, is moved into the cache rather than rebuilt.
+obtainSource :: Verbosity -> FilePath -> FilePath -> IO FilePath
+obtainSource verb cache bdir = do
+  let name = "godot-" ++ godotTag
+      src = cache </> name
+      unpacked dir = doesFileExist (dir </> ".godot-sys-unpacked")
+  done <- unpacked src
+  unless done $ do
+    legacy <- unpacked (bdir </> name)
+    moved <-
+      if not legacy
+        then pure False
+        else do
+          removeIfExists src
+          r <- try (renameDirectory (bdir </> name) src) :: IO (Either IOException ())
+          case r of
+            Right () -> notice verb ("godot-sys: moved the Godot source tree to " ++ src) >> pure True
+            Left _ -> pure False -- e.g. another file system: unpack instead
+    unless moved $ do
+      tarball <- obtainTarball verb cache bdir
+      notice verb ("godot-sys: unpacking " ++ tarball)
+      removeIfExists src
+      createDirectoryIfMissing True src
+      run cache "tar" ["-xJf", tarball, "-C", src, "--strip-components=1"]
+      writeFile (src </> ".godot-sys-unpacked") godotSha256
+  pure src
+
+obtainTarball :: Verbosity -> FilePath -> FilePath -> IO FilePath
+obtainTarball verb cache bdir = do
   local <- lookupEnv "GODOT_SYS_TARBALL"
   path <- case local of
     Just p -> makeAbsolute p
     Nothing -> do
-      let p = bdir </> ("godot-" ++ godotTag ++ ".tar.xz")
+      let file = "godot-" ++ godotTag ++ ".tar.xz"
+          p = cache </> file
+      -- One left in the build directory by an older godot-sys.
+      legacy <- doesFileExist (bdir </> file)
       have <- doesFileExist p
-      good <- if have then (== godotSha256) <$> sha256 p else pure False
+      when (legacy && not have) $
+        () <$ (try (renameFile (bdir </> file) p) :: IO (Either IOException ()))
+      have' <- doesFileExist p
+      good <- if have' then (== godotSha256) <$> sha256 p else pure False
       unless good $ do
         notice verb ("godot-sys: downloading " ++ godotUrl)
-        run bdir "curl" ["--fail", "--location", "--silent", "--show-error", "--output", p, godotUrl]
+        let tmp = p <.> "download"
+        run cache "curl" ["--fail", "--location", "--silent", "--show-error", "--output", tmp, godotUrl]
+        renameFile tmp p
       pure p
   actual <- sha256 path
   when (actual /= godotSha256) $
@@ -284,6 +367,9 @@ obtainTarball verb bdir = do
 
 sha256 :: FilePath -> IO String
 sha256 path = takeWhile (not . isSpace) <$> readProcess "sha256sum" [path] ""
+
+sha256String :: String -> IO String
+sha256String str = takeWhile (not . isSpace) <$> readProcess "sha256sum" [] str
 
 -- | @bin/libgodot.linuxbsd.<target>.<arch>.{a,so}@
 findGodotOutput :: FilePath -> GodotConfig -> IO FilePath

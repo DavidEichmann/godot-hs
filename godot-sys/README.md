@@ -43,10 +43,27 @@ Depending on `godot-sys` gives your package:
 
 | Variable                 | Effect                                                        |
 | ------------------------ | ------------------------------------------------------------- |
-| `GODOT_SYS_SOURCE_DIR`   | Build from an existing Godot source tree instead of the tarball (must be the pinned version). SCons builds incrementally in that tree; switching between static and shared triggers a full rebuild. |
+| `GODOT_SYS_CACHE_DIR`    | Where to keep the Godot source and builds (default: `~/.cache/godot-sys`, see [The build cache](#the-build-cache)). |
+| `GODOT_SYS_SOURCE_DIR`   | Build from an existing Godot source tree instead of the tarball (must be the pinned version). SCons builds incrementally in that tree; switching between static and shared triggers a full rebuild. Builds from such a tree are not cached. |
 | `GODOT_SYS_TARBALL`      | Use a local copy of the pinned tarball (hash still verified).  |
 | `GODOT_SYS_JOBS`         | Parallel SCons jobs (default: number of CPUs).                 |
 | `GODOT_SYS_SCONS_FLAGS`  | Extra SCons arguments, e.g. `"module_mono_enabled=no lto=none"`. |
+
+## The build cache
+
+Building Godot takes a long time, so the unpacked source tree, SCons's
+object files and each finished library (one per target, library kind and
+set of SCons flags) are kept in `~/.cache/godot-sys` (or
+`$GODOT_SYS_CACHE_DIR`), not in Cabal's build directory. Other build
+directories then reuse the library instead of building Godot again: the
+Haskell Language Server's (hie-bios builds in its own directory under
+`~/.cache/hie-bios`), git worktrees, other projects, and `dist-newstyle`
+after a `cabal clean`.
+
+A lock in the cache lets only one build use it at a time, so an editor
+starting HLS while `cabal build` runs waits instead of corrupting the tree.
+Delete the directory to free its space (about 1.2 GB) or to force a rebuild;
+`cabal clean` leaves it alone.
 
 ## Updating Godot
 
@@ -73,10 +90,12 @@ tree.
 
 1. **configure** adds `godot` to `extra-libraries`, and the build and install
    directories to `extra-lib-dirs` / `include-dirs` (and rpath for shared).
-2. **build** downloads and verifies the tarball, runs
+2. **build** uses the [cached](#the-build-cache) library if there is one.
+   Otherwise it downloads and verifies the tarball, runs
    `scons platform=linuxbsd target=template_debug library_type=static_library ccflags=-fPIC disable_path_overrides=no`
-   (or `shared_library` / `template_release`), then stages the library and
-   headers in the component build directory. `disable_path_overrides=no`
+   (or `shared_library` / `template_release`) and saves the library and
+   headers in the cache. Either way it then copies them into the component
+   build directory. `disable_path_overrides=no`
    keeps `--path` / `--main-pack` working so the host can point Godot at its
    project (later `GODOT_SYS_SCONS_FLAGS` values override it). For static builds, the
    per-subsystem archives SCons produces are merged into one `libgodot.a`.
