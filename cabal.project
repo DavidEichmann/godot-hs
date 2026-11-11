@@ -2,6 +2,7 @@ packages:
   godot-sys
   godot-low
   godot-low-example
+  godot-imui
 
 tests: True
 

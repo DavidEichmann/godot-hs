@@ -1,0 +1,76 @@
+cabal-version:      3.0
+name:               godot-imui
+version:            0.1.0.0
+synopsis:           Simple immediate mode UI for Haskell, rendered by Godot
+description:
+  A small, high-level UI library built on godot-low. The whole UI is a
+  Haskell function that runs every frame; there is no Godot project, scene
+  or editor involved:
+  .
+  @
+  import Godot.ImUI
+  .
+  main :: IO ()
+  main = runUI defaultWindow (0 :: Int) $ \\count -> do
+    label ("Count: " ++ show count)
+    clicked <- button "Increment"
+    pure (if clicked then count + 1 else count)
+  @
+  .
+  Only Godot's 2D UI nodes (@Control@s) are exposed. "Godot.ImUI" is the
+  whole public API; "Godot.ImUI.Internal" has the building blocks for
+  wrapping further controls.
+license:            MIT
+license-file:       LICENSE
+author:             David Eichmann
+maintainer:         eichmannd@gmail.com
+category:           GUI, Game Engine
+build-type:         Simple
+extra-doc-files:    README.md
+tested-with:        GHC == 9.12.2
+
+source-repository head
+  type:     git
+  location: .
+  subdir:   godot-imui
+
+common warnings
+  ghc-options: -Wall
+
+library
+  import:           warnings
+  exposed-modules:
+    Godot.ImUI
+    Godot.ImUI.Internal
+  hs-source-dirs:   src
+  build-depends:
+    , base        >=4.14 && <5
+    , containers  >=0.6  && <0.9
+    , directory   >=1.3  && <1.4
+    , filepath    >=1.4  && <1.6
+    , godot-low   ==0.1.*
+  default-language: Haskell2010
+
+-- A tour of the widgets: cabal run godot-imui-example
+executable godot-imui-example
+  import:           warnings
+  main-is:          Main.hs
+  hs-source-dirs:   example
+  build-depends:
+    , base        >=4.14 && <5
+    , godot-imui
+  ghc-options:      -threaded
+  default-language: Haskell2010
+
+test-suite godot-imui-test
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Main.hs
+  build-depends:
+    , base        >=4.14 && <5
+    , godot-imui
+    , directory
+    , godot-low
+  ghc-options:      -threaded
+  default-language: Haskell2010
