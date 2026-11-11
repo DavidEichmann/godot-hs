@@ -1,6 +1,7 @@
 packages:
   godot-sys
   godot-low
+  godot-low-example
 
 tests: True
 
