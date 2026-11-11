@@ -31,18 +31,24 @@ module Godot.ImUI.Internal
   , Attrs (..)
   , localAttrs
   , getAttrs
+  , afterFrame
 
     -- * Widgets
   , Widget (..)
   , Sizing (..)
   , natural
   , widget
+  , node
   , container
   , children
+  , contentRoot
   , prop
   , forget
   , controlled
+  , state
   , fired
+  , events
+  , release
 
     -- * Running
   , WindowConfig (..)
@@ -63,6 +69,7 @@ import Foreign.Ptr (freeHaskellFunPtr, nullPtr)
 import Foreign.Storable (poke)
 import GHC.Clock (getMonotonicTimeNSec)
 import Godot.Api
+import Godot.Api.Internal (getInterface)
 import qualified Godot.Api.Class.Control as Control
 import qualified Godot.Api.Class.DisplayServer as DisplayServer
 import qualified Godot.Api.Class.Engine as Engine
@@ -71,6 +78,7 @@ import qualified Godot.Api.Class.MarginContainer as MarginContainer
 import qualified Godot.Api.Class.Node as Node
 import qualified Godot.Api.Class.Object as Object
 import qualified Godot.Api.Class.PanelContainer as PanelContainer
+import qualified Godot.Api.Class.RefCounted as RefCounted
 import qualified Godot.Api.Class.SceneTree as SceneTree
 import qualified Godot.Api.Class.VBoxContainer as VBoxContainer
 import qualified Godot.GDExtension as GDE
@@ -118,11 +126,14 @@ data Env = Env
   , envKey :: !String
   -- ^ distinguishes widgets of the same kind (see 'Godot.ImUI.keyed')
   , envTree :: !SceneTree
+  , envAfter :: !(IORef [IO ()])
+  -- ^ what 'afterFrame' queued, last first
   }
 
 -- | The children of a container, while they are being reconciled.
 data Scope = Scope
-  { scopeParent :: !Node
+  { scopeWidget :: !Widget
+  -- ^ the container
   , scopeHorizontal :: !Bool
   -- ^ does the container lay its children out left to right?
   , scopeOld :: !(IORef [Widget])
@@ -152,20 +163,28 @@ localAttrs f (UI body) = UI (\env -> body env {envAttrs = f (envAttrs env)})
 getAttrs :: UI Attrs
 getAttrs = UI (pure . envAttrs)
 
+-- | An action that runs the given one once the whole UI function has run
+-- for this frame, and the widgets it no longer creates are gone. (For
+-- example to show a window only after the one it replaces is removed.)
+afterFrame :: UI (IO () -> IO ())
+afterFrame = UI (\env -> pure (\action -> modifyIORef' (envAfter env) (action :)))
+
 --------------------------------------------------------------------------------
 -- Widgets
 
--- | A retained Godot control, with what was last sent to it.
+-- | A retained Godot node (usually a control), with what was last sent to
+-- it.
 data Widget = Widget
   { wKind :: !String
   , wKey :: !String
-  , wControl :: !Control
+  , wNode :: !Node
   , wChildren :: !(IORef [Widget])
   , wProps :: !(IORef (Map.Map String Dynamic))
-  -- ^ the last value of each 'prop'
-  , wSignals :: !(IORef (Map.Map String (IORef Bool)))
-  -- ^ connected signals, and whether they fired since last read by 'fired'
+  -- ^ the last value of each 'prop', and each 'state'
   }
+
+newWidget :: String -> String -> Node -> IO Widget
+newWidget kind key n = Widget kind key n <$> newIORef [] <*> newIORef Map.empty
 
 -- | How a kind of widget is sized by default. 'Godot.ImUI.expand' and
 -- 'Godot.ImUI.minSize' override it.
@@ -187,34 +206,41 @@ natural = Sizing False False (0, 0)
 -- The kind identifies the widget type and how it was set up; widgets of
 -- different kinds are never reused for each other.
 widget :: forall c. Inherits c Control => String -> Sizing -> IO c -> UI (Widget, c)
-widget kind sizing create = UI $ \env -> do
+widget kind sizing create = do
+  (w, c) <- node kind (upcast @Control <$> create)
+  applyAttrs w c sizing
+  pure (w, unsafeFromObjectPtr (toObjectPtr c))
+
+-- | Like 'widget', for nodes that are not controls (popups, windows, ...):
+-- they are not laid out by their container, so the sizing modifiers do not
+-- apply to them.
+node :: forall c. Inherits c Node => String -> IO c -> UI (Widget, c)
+node kind create = UI $ \env -> do
   let sc = envScope env
       key = envKey env
-      parent = scopeParent sc
+      parent = wNode (scopeWidget sc)
   old <- readIORef (scopeOld sc)
   n <- readIORef (scopeCount sc)
   w <- case break (\w -> wKind w == kind && wKey w == key) old of
     (skipped, w : rest) -> do
       writeIORef (scopeOld sc) (skipped ++ rest)
-      unless (null skipped) $ Node.moveChild parent (upcast (wControl w)) n
+      unless (null skipped) $ Node.moveChild parent (wNode w) n
       pure w
     (_, []) -> do
-      c <- upcast @Control <$> create
-      w <- Widget kind key c <$> newIORef [] <*> newIORef Map.empty <*> newIORef Map.empty
-      Node.addChild parent (upcast c) False Node_INTERNAL_MODE_DISABLED
-      unless (null old) $ Node.moveChild parent (upcast c) n
+      c <- upcast @Node <$> create
+      w <- newWidget kind key c
+      Node.addChild parent c False Node_INTERNAL_MODE_DISABLED
+      unless (null old) $ Node.moveChild parent c n
       pure w
   modifyIORef' (scopeNew sc) (w :)
   writeIORef (scopeCount sc) (n + 1)
-  unUI (applyAttrs w sizing) env
-  pure (w, unsafeFromObjectPtr (toObjectPtr (wControl w)))
+  pure (w, unsafeFromObjectPtr (toObjectPtr (wNode w)))
 
 -- | Size and tooltip, from the widget's defaults and the modifiers in scope.
-applyAttrs :: Widget -> Sizing -> UI ()
-applyAttrs w sizing = do
+applyAttrs :: Widget -> Control -> Sizing -> UI ()
+applyAttrs w c sizing = do
   attrs <- getAttrs
-  let c = wControl w
-      flags grows = if grows || attrExpand attrs then Control_SIZE_EXPAND_FILL else Control_SIZE_FILL
+  let flags grows = if grows || attrExpand attrs then Control_SIZE_EXPAND_FILL else Control_SIZE_FILL
       minSz = if attrMinSize attrs == (0, 0) then defaultMinSize sizing else attrMinSize attrs
   prop w "imui:layout" (growsHorizontally sizing || attrExpand attrs, growsVertically sizing || attrExpand attrs, minSz) $ \_ -> do
     Control.setHSizeFlags c (flags (growsHorizontally sizing))
@@ -241,8 +267,8 @@ container kind horizontal sizing create body = do
 -- widget (replacing the ones it created last frame but not this time).
 children :: Bool -> Widget -> UI a -> UI a
 children horizontal w (UI body) = UI $ \env -> do
-  let parent = upcast (wControl w) :: Node
-  sc <- Scope parent horizontal <$> (newIORef =<< readIORef (wChildren w)) <*> newIORef [] <*> newIORef 0
+  let parent = wNode w
+  sc <- Scope w horizontal <$> (newIORef =<< readIORef (wChildren w)) <*> newIORef [] <*> newIORef 0
   a <-
     body
       env
@@ -251,9 +277,25 @@ children horizontal w (UI body) = UI $ \env -> do
         , envKey = ""
         }
   unused <- readIORef (scopeOld sc)
-  mapM_ (\u -> let c = upcast (wControl u) :: Node in Node.removeChild parent c >> Node.queueFree c) unused
+  mapM_ (\u -> Node.removeChild parent (wNode u) >> Node.queueFree (wNode u)) unused
   writeIORef (wChildren w) . reverse =<< readIORef (scopeNew sc)
   pure a
+
+-- | Fill a window with a themed background, a margin and a vertical box,
+-- and return the box as a widget whose 'children' are the window's content.
+contentRoot :: Node -> IO Widget
+contentRoot window = do
+  background <- PanelContainer.construct
+  Node.addChild window (upcast background) False Node_INTERNAL_MODE_DISABLED
+  Control.setAnchorsAndOffsetsPreset background Control_PRESET_FULL_RECT Control_PRESET_MODE_MINSIZE 0
+  margin <- MarginContainer.construct
+  mapM_
+    (\side -> toStringName ("margin_" ++ side) >>= \name -> Control.addThemeConstantOverride margin name 12)
+    ["left", "top", "right", "bottom"]
+  Node.addChild background (upcast margin) False Node_INTERNAL_MODE_DISABLED
+  box <- VBoxContainer.construct
+  Node.addChild margin (upcast box) False Node_INTERNAL_MODE_DISABLED
+  newWidget "Root" "" (upcast box)
 
 -- | Set a property of the control, unless it was last set to the same
 -- value. The name only has to be unique within the widget.
@@ -289,21 +331,47 @@ controlled w model get set = liftIO $ do
       -- The control may adjust what it is given (e.g. clamp it to a range).
       | otherwise -> set model >> get >>= remember
 
--- | Did the control emit this signal since the last time this was asked?
--- (Connects to the signal the first time, so that is always 'False'.)
-fired :: Widget -> String -> UI Bool
-fired w signal = liftIO $ do
-  signals <- readIORef (wSignals w)
-  case Map.lookup signal signals of
-    Just flag -> atomicModifyIORef' flag (\f -> (False, f))
+-- | Haskell-side state that lives as long as the widget, made by the given
+-- action the first time. The name only has to be unique within the widget.
+state :: Typeable s => Widget -> String -> IO s -> UI s
+state w name create = liftIO $ do
+  props <- readIORef (wProps w)
+  case Map.lookup key props >>= fromDynamic of
+    Just s -> pure s
     Nothing -> do
-      flag <- newIORef False
-      name <- toStringName signal
-      callback <- newCallable (\_ -> writeIORef flag True)
-      err <- Object.connect (wControl w) name callback 0
-      when (err /= OK) $ fail ("Godot.ImUI: cannot connect to signal " ++ signal ++ " of a " ++ wKind w)
-      modifyIORef' (wSignals w) (Map.insert signal flag)
-      pure False
+      s <- create
+      modifyIORef' (wProps w) (Map.insert key (toDyn s))
+      pure s
+  where
+    key = "state:" ++ name
+
+-- | The times the node emitted this signal since this was last asked, oldest
+-- first, each decoded from the signal's arguments by the given function
+-- (which runs when the signal is emitted). Connects to the signal the first
+-- time, so that always returns none.
+events :: Typeable e => Widget -> String -> ([Variant] -> IO e) -> UI [e]
+events w signal decode = do
+  queue <- state w ("signal:" ++ signal) $ do
+    queue <- newIORef []
+    name <- toStringName signal
+    callback <- newCallable (\args -> decode args >>= \e -> modifyIORef' queue (e :))
+    err <- Object.connect (wNode w) name callback 0
+    when (err /= OK) $ fail ("Godot.ImUI: cannot connect to signal " ++ signal ++ " of a " ++ wKind w)
+    pure queue
+  liftIO (reverse <$> atomicModifyIORef' queue (\es -> ([], es)))
+
+-- | Did the node emit this signal since the last time this was asked?
+fired :: Widget -> String -> UI Bool
+fired w signal = not . null <$> events w signal (\_ -> pure ())
+
+-- | Give up a reference to a reference counted object, such as the ones
+-- Godot's methods return. (godot-low does not count references itself.)
+release :: Inherits a RefCounted => a -> IO ()
+release object = do
+  unused <- RefCounted.unreference object
+  when unused $ do
+    iface <- getInterface
+    GDE.object_destroy iface (toObjectPtr object)
 
 --------------------------------------------------------------------------------
 -- Running
@@ -376,10 +444,12 @@ runUIWith extraArgs win initial frame = do
           setCurrentDirectory cwd
           (tree, root) <- setupRoot title
           -- 'children' replaces this scope with a fresh one for each frame.
-          outside <- Scope (upcast (wControl root)) False <$> newIORef [] <*> newIORef [] <*> newIORef 0
-          let env = Env {envScope = outside, envAttrs = defaultAttrs, envKey = "", envTree = tree}
+          outside <- Scope root False <$> newIORef [] <*> newIORef [] <*> newIORef 0
+          after <- newIORef []
+          let env = Env {envScope = outside, envAttrs = defaultAttrs, envKey = "", envTree = tree, envAfter = after}
               loop s = do
                 s' <- unUI (children False root (frame s)) env
+                sequence_ . reverse =<< atomicModifyIORef' after (\queued -> ([], queued))
                 stop <- GodotInstance.iteration inst
                 unless stop (loop s')
           loop initial
@@ -401,8 +471,7 @@ alreadyRun = unsafePerformIO (newIORef False)
 quit :: UI ()
 quit = UI (\env -> SceneTree.quit (envTree env) 0)
 
--- | The widget holding the top-level UI: a themed background filling the
--- window, a margin, and a vertical box.
+-- | The scene tree and the widget holding the top-level UI.
 setupRoot :: String -> IO (SceneTree, Widget)
 setupRoot title = do
   Just mainLoop <- Engine.getMainLoop =<< Engine.singleton
@@ -413,17 +482,7 @@ setupRoot title = do
   display <- DisplayServer.singleton
   titleString <- toGString title
   DisplayServer.windowSetTitle display titleString 0
-  background <- PanelContainer.construct
-  Node.addChild window (upcast background) False Node_INTERNAL_MODE_DISABLED
-  Control.setAnchorsAndOffsetsPreset background Control_PRESET_FULL_RECT Control_PRESET_MODE_MINSIZE 0
-  margin <- MarginContainer.construct
-  mapM_
-    (\side -> toStringName ("margin_" ++ side) >>= \name -> Control.addThemeConstantOverride margin name 12)
-    ["left", "top", "right", "bottom"]
-  Node.addChild background (upcast margin) False Node_INTERNAL_MODE_DISABLED
-  box <- VBoxContainer.construct
-  Node.addChild margin (upcast box) False Node_INTERNAL_MODE_DISABLED
-  root <- Widget "Root" "" (upcast box) <$> newIORef [] <*> newIORef Map.empty <*> newIORef Map.empty
+  root <- contentRoot (upcast window)
   pure (tree, root)
 
 -- | Godot only runs a project, so make an empty one in a fresh temporary
@@ -463,6 +522,8 @@ createProject title (width, height) = do
       , "file_logging/enable_file_logging.pc=false"
       , ""
       , "[display]"
+      , -- Dialogs and menus are windows of their own.
+        "window/subwindows/embed_subwindows=false"
       , "window/size/viewport_width=" ++ show width
       , "window/size/viewport_height=" ++ show height
       ]

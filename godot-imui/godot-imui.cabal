@@ -27,6 +27,7 @@ maintainer:         eichmannd@gmail.com
 category:           GUI, Game Engine
 build-type:         Simple
 extra-doc-files:    README.md
+data-files:         example/lambda.png
 tested-with:        GHC == 9.12.2
 
 source-repository head
@@ -55,6 +56,8 @@ library
 executable godot-imui-example
   import:           warnings
   main-is:          Main.hs
+  other-modules:    Paths_godot_imui
+  autogen-modules:  Paths_godot_imui
   hs-source-dirs:   example
   build-depends:
     , base        >=4.14 && <5
@@ -69,8 +72,10 @@ test-suite godot-imui-test
   main-is:          Main.hs
   build-depends:
     , base        >=4.14 && <5
-    , godot-imui
+    , containers
     , directory
+    , filepath
+    , godot-imui
     , godot-low
   ghc-options:      -threaded
   default-language: Haskell2010

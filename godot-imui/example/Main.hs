@@ -3,6 +3,7 @@ module Main (main) where
 
 import Control.Monad (forM, when)
 import Godot.ImUI
+import Paths_godot_imui (getDataFileName)
 
 data State = State
   { tab :: Int
@@ -15,16 +16,23 @@ data State = State
   , todos :: [Todo]
   , newTodo :: String
   , nextId :: Int
+  , selected :: Maybe [Int]
+  -- ^ the path to the selected item of the tree
+  , picture :: FilePath
+  , choosingPicture :: Bool
   , notes :: String
+  , showFooter :: Bool
+  , aboutOpen :: Bool
   }
 
 data Todo = Todo {todoId :: Int, todoDone :: Bool, todoText :: String}
 
 main :: IO ()
-main =
-  runUI defaultWindow {windowTitle = "godot-imui example", windowSize = (520, 520)} initial ui
+main = do
+  logo <- getDataFileName "example/lambda.png"
+  runUI defaultWindow {windowTitle = "godot-imui example", windowSize = (560, 560)} (initial logo) ui
   where
-    initial =
+    initial logo =
       State
         { tab = 0
         , clicks = 0
@@ -36,28 +44,89 @@ main =
         , todos = [Todo 0 True "Write a UI library", Todo 1 False "Write a UI with it"]
         , newTodo = ""
         , nextId = 2
+        , selected = Just [0, 1]
+        , picture = logo
+        , choosingPicture = False
         , notes = "Edit me.\n"
+        , showFooter = True
+        , aboutOpen = False
         }
 
 -- | The whole UI. Runs every frame with the current state, and returns the
 -- state for the next frame.
 ui :: State -> UI State
-ui s = do
-  heading "godot-imui"
-  tab' <- tabBar ["Widgets", "To do", "Notes"] (tab s)
+ui s0 = do
+  s <- menus s0
+  tab' <- tabBar ["Widgets", "To do", "Browse", "Notes"] (tab s)
   -- Each tab's content is keyed, so that the widgets of one tab are not
   -- reused for another, and expands, to keep the footer at the bottom.
   s' <- case tab' of
     0 -> keyed "widgets" (expand (vbox (widgetsTab s)))
     1 -> keyed "todo" (expand (vbox (todoTab s)))
+    2 -> keyed "browse" (expand (vbox (browseTab s)))
     _ -> keyed "notes" (expand (vbox (notesTab s)))
-  separator
-  hbox $ do
-    label "Rendered by Godot, written in Haskell."
-    spacer
-    close <- button "Quit"
+  when (showFooter s') $ do
+    separator
+    hbox $ do
+      label "Rendered by Godot, written in Haskell."
+      spacer
+      close <- button "Quit"
+      when close quit
+  dialogs s' {tab = tab'}
+
+-- | The menu bar. Choosing an item just changes the state.
+menus :: State -> UI State
+menus s = menuBar $ do
+  choose <- menu "File" $ do
+    choose <- menuItem "Choose picture..."
+    menuSeparator
+    close <- menuItem "Quit"
     when close quit
-  pure s' {tab = tab'}
+    pure choose
+  (footer', tab') <- menu "View" $ do
+    footer' <- menuCheck "Show footer" (showFooter s)
+    menuSeparator
+    -- A submenu, with an item per tab.
+    tab' <- menu "Go to" $ do
+      chosen <- forM (zip [0 ..] ["Widgets", "To do", "Browse", "Notes"]) $ \(i, title) -> do
+        go <- menuItem title
+        pure [i | go]
+      pure (case concat chosen of i : _ -> i; [] -> tab s)
+    pure (footer', tab')
+  about <- menu "Help" (menuItem "About")
+  pure
+    s
+      { choosingPicture = choosingPicture s || choose
+      , showFooter = footer'
+      , tab = tab'
+      , aboutOpen = aboutOpen s || about
+      }
+
+-- | Dialogs are open for as long as they are created.
+dialogs :: State -> UI State
+dialogs s = do
+  aboutOpen' <-
+    if not (aboutOpen s)
+      then pure False
+      else do
+        ok <- dialog "About" $ do
+          hbox $ do
+            minSize 64 64 (image (picture s))
+            vbox $ do
+              heading "godot-imui"
+              richText "A [b]simple[/b] immediate mode UI,\nrendered by [color=#6ab0f3]Godot[/color]."
+          hbox (spacer >> button "OK")
+        -- Open until OK is clicked or the window is closed.
+        pure (ok == Just False)
+  let s' = s {aboutOpen = aboutOpen'}
+  if not (choosingPicture s)
+    then pure s'
+    else do
+      choice <- openFileDialog "Choose a picture" ["*.png", "*.jpg", "*.jpeg", "*.svg", "*.webp"]
+      pure $ case choice of
+        Choosing -> s'
+        Cancelled -> s' {choosingPicture = False}
+        Chose path -> s' {choosingPicture = False, picture = path, tab = 2}
 
 widgetsTab :: State -> UI State
 widgetsTab s = do
@@ -73,9 +142,9 @@ widgetsTab s = do
     label "Copies"
     copies' <- spinBox (1, 10) (copies s)
     label "Size"
-    size' <- dropdown ["Small", "Medium", "Large"] (size s)
+    size' <- hbox (radioButtons ["Small", "Medium", "Large"] (size s))
     pure s {name = name', volume = volume', copies = copies', size = size'}
-  subscribe' <- checkbox "Subscribe to the newsletter" (subscribe s)
+  subscribe' <- toggle "Subscribe to the newsletter" (subscribe s)
   progressBar (volume s' / 100)
   paragraph $
     "Hello, "
@@ -107,6 +176,33 @@ todoTab s = do
     if add
       then s {todos = todos' ++ [Todo (nextId s) False text'], nextId = nextId s + 1, newTodo = ""}
       else s {todos = todos', newTodo = text'}
+
+-- | A tree on the left, and something about its selected item on the right.
+browseTab :: State -> UI State
+browseTab s = do
+  (selected', choose) <-
+    hsplit
+      (expand (tree library (selected s)))
+      ( do
+          heading (maybe "Nothing selected" (titleAt library) (selected s))
+          expand (image (picture s))
+          hbox (spacer >> button "Choose picture...")
+      )
+  pure s {selected = selected', choosingPicture = choosingPicture s || choose}
+
+library :: Forest String
+library =
+  [ Node "Languages" [Node "Haskell" [], Node "GDScript" [], Node "C++" []]
+  , Node "Engines" [Node "Godot" [Node "2D" [], Node "3D" [], Node "UI" []]]
+  , Node "Libraries" [Node "godot-sys" [], Node "godot-low" [], Node "godot-imui" []]
+  ]
+
+-- | The label of the item at a path.
+titleAt :: Forest String -> [Int] -> String
+titleAt forest path = case path of
+  [] -> ""
+  [i] -> rootLabel (forest !! i)
+  i : rest -> titleAt (subForest (forest !! i)) rest
 
 notesTab :: State -> UI State
 notesTab s = do

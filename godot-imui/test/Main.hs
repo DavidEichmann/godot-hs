@@ -12,12 +12,24 @@ import Control.Exception (IOException, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.IORef
 import Data.Int (Int64)
+import qualified Data.Tree as T
 import Godot.Api
 import qualified Godot.Api.Class.BaseButton as BaseButton
 import qualified Godot.Api.Class.Button as Button
 import qualified Godot.Api.Class.Control as Control
 import qualified Godot.Api.Class.Engine as Engine
+import qualified Godot.Api.Class.ColorPickerButton as ColorPickerButton
+import qualified Godot.Api.Class.Image as Image
+import qualified Godot.Api.Class.ItemList as ItemList
 import qualified Godot.Api.Class.Label as Label
+import qualified Godot.Api.Class.MenuBar as MenuBar
+import qualified Godot.Api.Class.MenuButton as MenuButton
+import qualified Godot.Api.Class.PopupMenu as PopupMenu
+import qualified Godot.Api.Class.Texture2D as Texture2D
+import qualified Godot.Api.Class.TextureRect as TextureRect
+import qualified Godot.Api.Class.Tree as Tree
+import qualified Godot.Api.Class.TreeItem as TreeItem
+import qualified Godot.Api.Class.Window as Window
 import qualified Godot.Api.Class.LineEdit as LineEdit
 import qualified Godot.Api.Class.Node as Node
 import qualified Godot.Api.Class.Object as Object
@@ -26,9 +38,10 @@ import qualified Godot.Api.Class.Range as Range
 import qualified Godot.Api.Class.SceneTree as SceneTree
 import qualified Godot.Api.Class.TabBar as TabBar
 import qualified Godot.Api.Class.TextEdit as TextEdit
-import Godot.ImUI
-import Godot.ImUI.Internal (runUIWith)
-import System.Directory (getCurrentDirectory)
+import Godot.ImUI hiding (Forest, Tree (..))
+import Godot.ImUI.Internal (release, runUIWith)
+import System.Directory (getCurrentDirectory, getTemporaryDirectory, removeFile)
+import System.FilePath ((</>))
 import System.Exit (exitFailure)
 
 data State = State
@@ -43,6 +56,20 @@ data State = State
   , tab :: Int
   , items :: [String]
   -- ^ keys of a list of text fields
+  , extra :: Extra
+  }
+
+-- | The state of the widgets in 'extras'.
+data Extra = Extra
+  { wrap :: Bool
+  , forest :: T.Forest String
+  , treeSel :: Maybe [Int]
+  , listSel :: Int
+  , radio :: Int
+  , switch :: Bool
+  , colour :: Color
+  , dialogOpen :: Bool
+  , fileOpen :: Bool
   }
 
 main :: IO ()
@@ -53,7 +80,11 @@ main = do
       check what ok = liftIO $ do
         putStrLn ((if ok then "ok   " else "FAIL ") ++ what)
         unless ok (modifyIORef' failures (+ 1))
-      initial = State 0 0 "start" "" False 2 1 0 0 ["a", "b", "c"]
+      fruit = [T.Node "Fruit" [T.Node "Apple" [], T.Node "Pear" []], T.Node "Veg" [T.Node "Leek" []], T.Node "Bread" []]
+      initial =
+        State 0 0 "start" "" False 2 1 0 0 ["a", "b", "c"] $
+          Extra False fruit Nothing 0 0 False (Color 1 0 0 1) False False
+  png <- (</> "godot-imui-test.png") <$> getTemporaryDirectory
   -- Remembered between frames: the Godot objects behind the list items.
   itemIds <- newIORef []
   cwdBefore <- getCurrentDirectory
@@ -62,6 +93,12 @@ main = do
   runUIWith ["--headless"] defaultWindow {windowTitle = "godot-imui \"test\""} initial $ \s -> do
     let f = frame s
     when (f == 2) (liftIO (writeIORef cwdInside =<< getCurrentDirectory))
+    -- An image file for 'image' to load.
+    when (f == 0) $ liftIO $ do
+      Just pixels <- Image.createEmpty 8 4 False Image_FORMAT_RGBA8
+      Image.fill pixels (Color 1 0 0 1)
+      _ <- Image.savePng pixels =<< toGString png
+      release pixels
     heading "Test" -- 0
     clicked <- button ("Count: " ++ show (count s)) -- 1
     name' <- placeholder "Name" (textInput (name s)) -- 2
@@ -87,11 +124,13 @@ main = do
       _ <- tooltip "tip" (minSize 80 0 (button "B"))
       center (paragraph "C")
       padding 4 (label "D")
-    -- 13..: keyed items, reordered in frame 6
+    -- 13: the rest of the widgets
+    extra' <- vbox (extras check png f (extra s))
+    -- 14..: keyed items, reordered in frame 6
     forM_ (items s) $ \item -> keyed item (textInput item)
 
     box <- liftIO rootBox
-    let base = 13
+    let base = 14
     case f of
       -- The controls exist now: play the user.
       1 -> liftIO $ do
@@ -182,6 +221,7 @@ main = do
             , copies = copies'
             , size = size'
             , tab = tab'
+            , extra = extra'
             }
     pure $ case f of
       5 -> s' {name = "reset", size = 0, volume = 1}
@@ -189,6 +229,7 @@ main = do
       7 -> s' {items = ["c", "a"]}
       _ -> s'
 
+  removeFile png
   cwdAfter <- getCurrentDirectory
   check' failures ("the working directory is restored: " ++ cwdAfter) (cwdAfter == cwdBefore)
   inside <- readIORef cwdInside
@@ -205,14 +246,172 @@ main = do
   n <- readIORef failures
   when (n > 0 || not done) exitFailure
 
+-- | Menus, trees, images, dialogs, ...: the content of top-level widget 13.
+extras :: (String -> Bool -> UI ()) -> FilePath -> Int -> Extra -> UI Extra
+extras check png f x = do
+  (open, wrap', recent) <- menuBar $ do
+    -- 0
+    chosen <- menu "File" $ do
+      open <- menuItem "Open"
+      menuSeparator
+      wrap' <- menuCheck "Wrap" (wrap x)
+      recent <- menu "Recent" (menuItem "a.txt")
+      _ <- enabled False (menuItem "Disabled")
+      pure (open, wrap', recent)
+    about <- menu "Help" (menuItem "About")
+    check "menu: an item that was not chosen is not reported" (not about)
+    pure chosen
+  option <- menu "Options" (menuItem "One") -- 1
+  treeSel' <- tree (forest x) (treeSel x) -- 2
+  listSel' <- listBox ["x", "y", "z"] (listSel x) -- 3
+  image png -- 4
+  radio' <- hbox (radioButtons ["A", "B", "C"] (radio x)) -- 5
+  switch' <- toggle "Switch" (switch x) -- 6
+  linked <- link "Link" -- 7
+  richText "[b]Bold[/b]" -- 8
+  colour' <- colorPicker (colour x) -- 9
+  collapsible "More" (label "inside") -- 10
+  _ <- hsplit (label "left") (label "right") -- 11
+  _ <- flow (button "f1" >> button "f2") -- 12
+  -- 13: one of the dialogs, when open
+  dialogResult <- if dialogOpen x then Just <$> dialog "Dialog" (button "OK") else pure Nothing
+  fileResult <- if fileOpen x then openFileDialog "Open" ["*.txt"] else pure Choosing
+
+  e <- liftIO (rootBox >>= \box -> child @VBoxContainer box 13)
+  file <- liftIO (child @MenuBar e 0 >>= \bar -> child @PopupMenu bar 0)
+  let text get = liftIO (get >>= fromGString)
+  case f of
+    1 -> do
+      bar <- liftIO (child @MenuBar e 0)
+      menus <- liftIO (MenuBar.getMenuCount bar)
+      title <- text (MenuBar.getMenuTitle bar 0)
+      check ("menuBar: has its menus: " ++ show (menus, title)) (menus == 2 && title == "File")
+      n <- liftIO (PopupMenu.getItemCount file)
+      first <- text (PopupMenu.getItemText file 0)
+      isSeparator <- liftIO (PopupMenu.isItemSeparator file 1)
+      isChecked <- liftIO (PopupMenu.isItemChecked file 2)
+      submenu <- text (PopupMenu.getItemText file 3)
+      isDisabled <- liftIO (PopupMenu.isItemDisabled file 4)
+      check ("menu: has its items: " ++ show (n, first, submenu)) (n == 5 && first == "Open" && submenu == "Recent")
+      check "menu: separator, check mark and disabled item" (isSeparator && not isChecked && isDisabled)
+      t <- liftIO (child @Tree e 2)
+      Just root <- liftIO (Tree.getRoot t)
+      Just fruit <- liftIO (TreeItem.getChild root 0)
+      Just pear <- liftIO (TreeItem.getChild fruit 1)
+      Just veg <- liftIO (TreeItem.getChild root 1)
+      top <- liftIO (TreeItem.getChildCount root)
+      pearText <- text (TreeItem.getText pear 0)
+      check ("tree: has its items: " ++ show (top, pearText)) (top == 3 && pearText == "Pear")
+      shown <- liftIO (child @TextureRect e 4 >>= TextureRect.getTexture)
+      pixels <- case shown of
+        Nothing -> pure (0, 0)
+        Just texture -> liftIO $ do
+          dimensions <- (,) <$> Texture2D.getWidth texture <*> Texture2D.getHeight texture
+          release texture
+          pure dimensions
+      check ("image: shows the file: " ++ show pixels) (pixels == (8, 4))
+      -- Play the user.
+      liftIO $ do
+        emit file "index_pressed" . pure =<< toVariant (0 :: Int64)
+        emit file "index_pressed" . pure =<< toVariant (2 :: Int64)
+        recentMenu <- child @PopupMenu file 0
+        emit recentMenu "index_pressed" . pure =<< toVariant (0 :: Int64)
+        Just options <- child @MenuButton e 1 >>= MenuButton.getPopup
+        emit options "index_pressed" . pure =<< toVariant (0 :: Int64)
+        TreeItem.setCollapsed veg True
+        TreeItem.select pear 0 True
+        child @ItemList e 3 >>= \l -> ItemList.select l 2 True
+        child @HBoxContainer e 5 >>= \row -> child @CheckBox row 2 >>= \b -> BaseButton.setPressed b True
+        child @CheckButton e 6 >>= \b -> BaseButton.setPressed b True
+        child @LinkButton e 7 >>= \b -> emit b "pressed" []
+        child @ColorPickerButton e 9 >>= \b -> ColorPickerButton.setPickColor b (Color 0 1 0 1)
+    2 -> do
+      check "menuItem: chosen" open
+      check "menuCheck: toggled" wrap'
+      check "menu: an item of a submenu is chosen" recent
+      check "menu: outside a menu bar it is a button with a menu" option
+      check ("tree: returns the selected path: " ++ show treeSel') (treeSel' == Just [0, 1])
+      check ("listBox: returns the new selection: " ++ show listSel') (listSel' == 2)
+      check ("radioButtons: returns the new selection: " ++ show radio') (radio' == 2)
+      check "toggle: returns the new state" switch'
+      check "link: clicked" linked
+      check ("colorPicker: returns the new colour: " ++ show colour') (colour' == Color 0 1 0 1)
+    3 -> do
+      check "menuItem: chosen only once" (not open)
+      isChecked <- liftIO (PopupMenu.isItemChecked file 2)
+      check "menuCheck: shows the state" isChecked
+      row <- liftIO (child @HBoxContainer e 5)
+      pressed <- liftIO (forM [0, 2] (\i -> child @CheckBox row i >>= BaseButton.isPressed))
+      check ("radioButtons: only the selected one is on: " ++ show pressed) (pressed == [False, True])
+    -- In frame 3 the state below changes the forest.
+    4 -> do
+      t <- liftIO (child @Tree e 2)
+      Just root <- liftIO (Tree.getRoot t)
+      Just fruit <- liftIO (TreeItem.getChild root 0)
+      Just plum <- liftIO (TreeItem.getChild fruit 1)
+      Just veg <- liftIO (TreeItem.getChild root 1)
+      top <- liftIO (TreeItem.getChildCount root)
+      plumText <- text (TreeItem.getText plum 0)
+      check ("tree: shows the changed items: " ++ show (top, plumText)) (top == 4 && plumText == "Plum")
+      collapsed <- liftIO (TreeItem.isCollapsed veg)
+      check "tree: unchanged items keep their state" collapsed
+      selected <- liftIO (TreeItem.isSelected plum 0)
+      check ("tree: keeps the selection: " ++ show treeSel') (selected && treeSel' == Just [0, 1])
+    -- In frame 4 the state below opens the dialog.
+    5 -> do
+      win <- liftIO (child @Window e 13)
+      title <- text (Window.getTitle win)
+      modal <- liftIO (Window.isExclusive win)
+      check ("dialog: is created: " ++ title) (title == "Dialog" && modal)
+      ok <- liftIO $ do
+        background <- child @PanelContainer win 0
+        margin <- child @MarginContainer background 0
+        content <- child @VBoxContainer margin 0
+        child @Button content 0 >>= Button.getText >>= fromGString
+      check "dialog: holds its widgets" (ok == "OK")
+      check "dialog: returns its block's result while open" (dialogResult == Just (Just False))
+      liftIO (emit win "close_requested" [])
+    6 -> do
+      -- Windows are shown at the end of the frame that creates them.
+      visible <- liftIO (child @Window e 13 >>= Window.isVisible)
+      check "dialog: is shown" visible
+      check "dialog: returns Nothing when closed" (dialogResult == Just Nothing)
+    -- In frame 6 the state below closes the dialog and opens the file dialog.
+    7 -> do
+      d <- liftIO (child @FileDialog e 13)
+      check "openFileDialog: is created" (fileResult == Choosing)
+      liftIO (emit d "file_selected" . pure =<< toVariant =<< toGString "/tmp/chosen.txt")
+    8 -> do
+      visible <- liftIO (child @FileDialog e 13 >>= Window.isVisible)
+      check "openFileDialog: is shown" visible
+      check ("openFileDialog: returns the chosen file: " ++ show fileResult) (fileResult == Chose "/tmp/chosen.txt")
+      n <- liftIO (Node.getChildCount e False)
+      check ("dialog: is gone when no longer created: " ++ show n) (n == 14)
+    _ -> pure ()
+
+  let x' = x {wrap = wrap', treeSel = treeSel', listSel = listSel', radio = radio', switch = switch', colour = colour'}
+  pure $ case f of
+    3 -> x' {forest = [T.Node "Fruit" [T.Node "Apple" [], T.Node "Plum" []], T.Node "Veg" [T.Node "Leek" []], T.Node "Bread" [], T.Node "Milk" []]}
+    4 -> x' {dialogOpen = True}
+    6 -> x' {dialogOpen = False, fileOpen = True}
+    8 -> x' {fileOpen = False}
+    _ -> x'
+
+-- | Emit a signal of an object, with the given arguments.
+emit :: Inherits o Object => o -> String -> [Variant] -> IO ()
+emit object signal args = do
+  signalName <- toVariant =<< toStringName signal
+  _ <- Object.emitSignal object (signalName : args)
+  pure ()
+
 -- | The box holding the top-level widgets.
 rootBox :: IO Node
 rootBox = do
   Just mainLoop <- Engine.getMainLoop =<< Engine.singleton
-  Just tree <- cast @SceneTree mainLoop
-  Just window <- SceneTree.getRoot tree
-  n <- Node.getChildCount window False
-  Just background <- Node.getChild window (n - 1) False
+  Just sceneTree <- cast @SceneTree mainLoop
+  Just root <- SceneTree.getRoot sceneTree
+  n <- Node.getChildCount root False
+  Just background <- Node.getChild root (n - 1) False
   Just margin <- Node.getChild background 0 False
   Just box <- Node.getChild margin 0 False
   pure box

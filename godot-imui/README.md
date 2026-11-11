@@ -64,16 +64,61 @@ main = runUI defaultWindow {windowTitle = "Greeter"} (State "" False) ui
 | Widget | Description |
 | --- | --- |
 | `label`, `heading`, `paragraph` | text: one line, large, wrapping |
-| `button :: String -> UI Bool` | `True` when clicked |
-| `checkbox :: String -> Bool -> UI Bool` | a labelled checkbox |
+| `richText :: String -> UI ()` | formatted text, written in Godot's BBCode |
+| `image :: FilePath -> UI ()` | an image file; scaled to fit with `minSize` or `expand` |
+| `button`, `link :: String -> UI Bool` | `True` when clicked |
+| `checkbox`, `toggle :: String -> Bool -> UI Bool` | a labelled checkbox; an on/off switch |
+| `radioButtons :: [String] -> Int -> UI Int` | pick one option, by index |
 | `textInput`, `passwordInput :: String -> UI String` | single-line text field |
 | `textArea :: String -> UI String` | multi-line text editor |
 | `slider :: (Double, Double) -> Double -> UI Double` | a number in a range |
 | `spinBox :: (Int, Int) -> Int -> UI Int` | a whole number in a range |
-| `dropdown :: [String] -> Int -> UI Int` | pick one option, by index |
+| `dropdown`, `listBox :: [String] -> Int -> UI Int` | pick one option, by index |
+| `tree :: Forest String -> Maybe [Int] -> UI (Maybe [Int])` | collapsible tree (`Data.Tree`); the selection is the path of indices to the item |
+| `colorPicker :: Color -> UI Color` | a button that opens a colour picker |
 | `tabBar :: [String] -> Int -> UI Int` | tabs; show the current tab's content yourself |
 | `progressBar :: Double -> UI ()` | a fraction from 0 to 1 |
 | `separator`, `spacer` | a dividing line; empty space that pushes widgets apart |
+
+### Menus
+
+A menu is a block of items, and an item returns `True` when it is chosen. A
+`menu` inside a `menu` is a submenu; outside a `menuBar` it is a button that
+opens the menu.
+
+```haskell
+menuBar $ do
+  menu "File" $ do
+    open <- menuItem "Open..."
+    menuSeparator
+    close <- menuItem "Quit"
+    when close quit
+  menu "View" $ do
+    wrap' <- menuCheck "Wrap lines" wrap
+    ...
+```
+
+### Dialogs
+
+A dialog is a window of its own that is open for as long as you create it:
+keep whether it is open in your state.
+
+```haskell
+answer <- if asking then confirm "Delete" "Delete this item?" else pure Nothing
+case answer of
+  Nothing -> ...       -- not asked, or not answered yet
+  Just ok -> ...       -- stop asking; delete if ok
+```
+
+| Dialog | Description |
+| --- | --- |
+| `dialog`, `window :: String -> UI a -> UI (Maybe a)` | a window holding a block of widgets (`dialog` blocks the rest of the UI); `Nothing` when the user closes it |
+| `messageBox :: String -> String -> UI Bool` | a message; `True` when dismissed |
+| `confirm :: String -> String -> UI (Maybe Bool)` | OK / Cancel; `Nothing` until answered |
+| `openFileDialog`, `saveFileDialog :: String -> [String] -> UI (Choice FilePath)` | pick a file, given a title and patterns like `"*.png"` |
+| `directoryDialog :: String -> UI (Choice FilePath)` | pick a directory |
+
+`Choice` is `Choosing` (still open), `Cancelled` or `Chose path`.
 
 ### Layout
 
@@ -84,8 +129,11 @@ Containers take a block of widgets and return its result. The top level is a
 | --- | --- |
 | `vbox`, `hbox` | stack vertically; lay out in a row |
 | `grid n` | `n` columns, filled row by row |
+| `flow` | a row that wraps onto further rows |
 | `panel` | a framed group |
+| `collapsible "title"` | a group the user can fold away |
 | `scroll` | scrolls if the content does not fit; takes the space left |
+| `hsplit a b`, `vsplit a b` | two groups with a draggable divider; returns both results |
 | `center` | centres its content in the space left |
 | `padding n` | `n` pixels of empty space around the content |
 
@@ -128,6 +176,9 @@ from the previous frame: matching ones are reused, new ones are created, and
 the rest are freed. Properties are sent to Godot only when they change, and
 clicks arrive through Godot's signals.
 
+Menu items and tree items are not nodes in Godot, so those are collected
+while their block runs and synced with the popup or tree afterwards.
+
 `runUI` starts Godot inside your process (libgodot from
 [godot-sys](../godot-sys)). Godot can only run a project, so an empty one is
 written to a temporary directory and removed on exit. Godot is started
@@ -157,8 +208,9 @@ link text = do
 
 - `runUI` must be called from the main thread, and only once per process
   (Godot cannot be restarted). Link with `-threaded`.
-- One window. No dialogs, menus, images, trees or custom drawing yet, and no
-  styling beyond Godot's default theme.
+- No custom drawing, keyboard shortcuts for menu items, icons on buttons or
+  multi-column trees yet, and no styling beyond Godot's default theme.
+- File dialogs are Godot's own, not the desktop's.
 - Widget values are read back from Godot every frame, so a very large
   `textArea` costs time even when idle.
 
