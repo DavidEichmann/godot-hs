@@ -53,6 +53,7 @@ module Godot.ImUI.Internal
     -- * Running
   , WindowConfig (..)
   , defaultWindow
+  , Theme (..)
   , runUI
   , runUIWith
   , quit
@@ -63,12 +64,13 @@ import Control.Monad (unless, when)
 import Control.Monad.IO.Class (MonadIO (..))
 import Data.Dynamic (Dynamic, Typeable, fromDynamic, toDyn)
 import Data.IORef
+import Godot.ImUI.Theme (Theme (..), backgroundType, themeClearColor, themeResource)
 import Data.Int (Int64)
 import qualified Data.Map.Strict as Map
 import Foreign.Ptr (freeHaskellFunPtr, nullPtr)
 import Foreign.Storable (poke)
 import GHC.Clock (getMonotonicTimeNSec)
-import Godot.Api
+import Godot.Api hiding (Theme)
 import Godot.Api.Internal (getInterface)
 import qualified Godot.Api.Class.Control as Control
 import qualified Godot.Api.Class.DisplayServer as DisplayServer
@@ -286,6 +288,7 @@ children horizontal w (UI body) = UI $ \env -> do
 contentRoot :: Node -> IO Widget
 contentRoot window = do
   background <- PanelContainer.construct
+  Control.setThemeTypeVariation background =<< toStringName backgroundType
   Node.addChild window (upcast background) False Node_INTERNAL_MODE_DISABLED
   Control.setAnchorsAndOffsetsPreset background Control_PRESET_FULL_RECT Control_PRESET_MODE_MINSIZE 0
   margin <- MarginContainer.construct
@@ -381,11 +384,14 @@ data WindowConfig = WindowConfig
   { windowTitle :: String
   , windowSize :: (Int, Int)
   -- ^ initial width and height, in pixels
+  , windowTheme :: Theme
+  -- ^ the look of the controls
   }
 
--- | A 640x480 window titled after the program.
+-- | A 640x480 window titled after the program, in the dark 'ModernDark'
+-- theme.
 defaultWindow :: WindowConfig
-defaultWindow = WindowConfig {windowTitle = "", windowSize = (640, 480)}
+defaultWindow = WindowConfig {windowTitle = "", windowSize = (640, 480), windowTheme = ModernDark}
 
 -- | Open a window and run the UI in it until it is closed (or 'quit' is
 -- called).
@@ -427,7 +433,7 @@ runUIWith extraArgs win initial frame = do
         , GDE.gdExtensionInitialization_deinitialize = onLevel
         }
     pure 1
-  project <- createProject title (windowSize win)
+  project <- createProject title (windowSize win) (windowTheme win)
   -- Godot changes the working directory to the project's. Change it back
   -- once Godot is running, so that relative paths in the application keep
   -- meaning what they did.
@@ -487,8 +493,8 @@ setupRoot title = do
 
 -- | Godot only runs a project, so make an empty one in a fresh temporary
 -- directory. The UI itself is all created at runtime.
-createProject :: String -> (Int, Int) -> IO FilePath
-createProject title (width, height) = do
+createProject :: String -> (Int, Int) -> Theme -> IO FilePath
+createProject title (width, height) theme = do
   tmp <- getTemporaryDirectory
   let fresh = do
         n <- getMonotonicTimeNSec
@@ -500,43 +506,56 @@ createProject title (width, height) = do
             | isAlreadyExistsError e -> fresh
             | otherwise -> throwIO e
   dir <- fresh
-  writeFile (dir </> "project.godot") $
-    unlines
-      [ "config_version=5"
-      , ""
-      , "[application]"
-      , "config/name=" ++ quoted title
-      , -- One user data directory (shader cache etc.) for all godot-imui
-        -- programs, rather than one per window title.
-        "config/use_custom_user_dir=true"
-      , "config/custom_user_dir_name=\"godot-imui\""
-      , "run/main_scene=\"res://main.tscn\""
-      , -- Only redraw when something changed.
-        "run/low_processor_mode=true"
-      , -- ... and poll at about 100 Hz in between (the default is 144 Hz).
-        "run/low_processor_mode_sleep_usec=10000"
-      , "boot_splash/show_image=false"
-      , ""
-      , "[debug]"
-      , "file_logging/enable_file_logging=false"
-      , "file_logging/enable_file_logging.pc=false"
-      , ""
-      , "[rendering]"
-      , -- Godot's OpenGL renderer, which is plenty for 2D UI. It renders on
-        -- the GPU that drives the desktop. Godot's default Vulkan renderer
-        -- prefers a discrete GPU, and on hybrid graphics laptops (desktop
-        -- on the integrated GPU) presenting its frames across GPUs can
-        -- freeze the whole X server, especially while the window is moved
-        -- or resized. It also starts faster and uses less memory.
-        "renderer/rendering_method=\"gl_compatibility\""
-      , "renderer/rendering_method.mobile=\"gl_compatibility\""
-      , ""
-      , "[display]"
-      , -- Dialogs and menus are windows of their own.
-        "window/subwindows/embed_subwindows=false"
-      , "window/size/viewport_width=" ++ show width
-      , "window/size/viewport_height=" ++ show height
-      ]
+  -- The look of the controls, unless it is Godot's default theme.
+  themeSettings <- case (themeResource theme, themeClearColor theme) of
+    (Just resource, Just background) -> do
+      writeFile (dir </> "theme.tres") resource
+      pure
+        [ -- The background, seen while the window is resized.
+          "environment/defaults/default_clear_color=" ++ background
+        , ""
+        , "[gui]"
+        , "theme/custom=\"res://theme.tres\""
+        ]
+    _ -> pure []
+  writeFile (dir </> "project.godot") . unlines $
+    [ "config_version=5"
+    , ""
+    , "[application]"
+    , "config/name=" ++ quoted title
+    , -- One user data directory (shader cache etc.) for all godot-imui
+      -- programs, rather than one per window title.
+      "config/use_custom_user_dir=true"
+    , "config/custom_user_dir_name=\"godot-imui\""
+    , "run/main_scene=\"res://main.tscn\""
+    , -- Only redraw when something changed.
+      "run/low_processor_mode=true"
+    , -- ... and poll at about 100 Hz in between (the default is 144 Hz).
+      "run/low_processor_mode_sleep_usec=10000"
+    , "boot_splash/show_image=false"
+    , ""
+    , "[debug]"
+    , "file_logging/enable_file_logging=false"
+    , "file_logging/enable_file_logging.pc=false"
+    , ""
+    , "[rendering]"
+    , -- Godot's OpenGL renderer, which is plenty for 2D UI. It renders on
+      -- the GPU that drives the desktop. Godot's default Vulkan renderer
+      -- prefers a discrete GPU, and on hybrid graphics laptops (desktop
+      -- on the integrated GPU) presenting its frames across GPUs can
+      -- freeze the whole X server, especially while the window is moved
+      -- or resized. It also starts faster and uses less memory.
+      "renderer/rendering_method=\"gl_compatibility\""
+    , "renderer/rendering_method.mobile=\"gl_compatibility\""
+    ]
+      ++ themeSettings
+      ++ [ ""
+         , "[display]"
+         , -- Dialogs and menus are windows of their own.
+           "window/subwindows/embed_subwindows=false"
+         , "window/size/viewport_width=" ++ show width
+         , "window/size/viewport_height=" ++ show height
+         ]
   writeFile (dir </> "main.tscn") $
     unlines ["[gd_scene format=3]", "", "[node name=\"Main\" type=\"Node\"]"]
   -- Godot reports an error if an exported project has no script class cache.

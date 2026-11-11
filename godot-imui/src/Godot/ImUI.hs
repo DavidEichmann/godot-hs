@@ -28,6 +28,7 @@ module Godot.ImUI
     runUI
   , WindowConfig (..)
   , defaultWindow
+  , Theme (..)
   , UI
   , quit
   , liftIO
@@ -116,7 +117,7 @@ import Data.Int (Int64)
 import Data.List (intercalate)
 import Data.Maybe (isJust)
 import qualified Data.Tree as T
-import Godot.Api
+import Godot.Api hiding (Theme)
 import qualified Godot.Api.Builtin.PackedInt32Array as PackedInt32Array
 import qualified Godot.Api.Class.BaseButton as BaseButton
 import qualified Godot.Api.Class.Button as Button

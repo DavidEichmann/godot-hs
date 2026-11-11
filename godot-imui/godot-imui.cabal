@@ -43,6 +43,7 @@ library
   exposed-modules:
     Godot.ImUI
     Godot.ImUI.Internal
+  other-modules:    Godot.ImUI.Theme
   hs-source-dirs:   src
   build-depends:
     , base        >=4.14 && <5

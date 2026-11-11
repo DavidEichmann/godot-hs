@@ -55,6 +55,10 @@ main = runUI defaultWindow {windowTitle = "Greeter"} (State "" False) ui
   unchanged and the edit is undone.
 - Ordinary control flow decides what is shown: `when`, `case`, `forM`, ...
   Widgets that are not created in a frame disappear.
+- `WindowConfig` sets the window's title, size and look:
+  `defaultWindow {windowTitle = "Greeter", windowTheme = ModernLight}`.
+  The themes are `ModernDark` (the default), `ModernLight` and
+  `GodotDefault` (see [The look](#the-look)).
 - `UI` is a `MonadIO`, so `liftIO` runs any `IO` (keep it short: it runs on
   the UI thread, every frame unless you guard it). If you prefer mutable
   state, use `()` as the state and keep yours in `IORef`s.
@@ -181,12 +185,26 @@ while their block runs and synced with the popup or tree afterwards.
 
 `runUI` starts Godot inside your process (libgodot from
 [godot-sys](../godot-sys)). Godot can only run a project, so an empty one is
-written to a temporary directory and removed on exit. Godot is started
+written to a temporary directory (with the theme) and removed on exit. Godot is started
 with its OpenGL ("Compatibility") renderer, which renders on the GPU that
 drives the desktop (on a hybrid graphics laptop, presenting frames rendered
 on the discrete GPU can freeze the desktop), without audio, and in its low
 processor mode, in which it only redraws when something changed. Your function is still called for every frame (about 100
 times a second when idle), so keep it cheap.
+
+## The look
+
+The controls look like Godot's editor (its "Modern" style), in its default
+dark colours (`ModernDark`) or its light preset (`ModernLight`). Godot only
+has that style in its editor, which is not part of libgodot; applications get
+Godot's older default theme (`GodotDefault`). So
+[Godot.ImUI.Theme](src/Godot/ImUI/Theme.hs) ports the editor's style: it
+computes the colours, margins and styleboxes the way the editor does, embeds
+the editor's SVG icons (checkboxes, toggles, tree arrows, ...), and writes it
+all as a Godot theme resource in the temporary project. It differs from the
+editor in a few places to suit an application: `panel` is outlined,
+`richText` has no box around it, and menu bars are flat like the editor's main
+menu. The font is Godot's default font, not the editor's.
 
 ## Other controls
 
@@ -211,7 +229,7 @@ link text = do
 - `runUI` must be called from the main thread, and only once per process
   (Godot cannot be restarted). Link with `-threaded`.
 - No custom drawing, keyboard shortcuts for menu items, icons on buttons or
-  multi-column trees yet, and no styling beyond Godot's default theme.
+  multi-column trees yet, and no styling beyond the three themes.
 - File dialogs are Godot's own, not the desktop's.
 - Widget values are read back from Godot every frame, so a very large
   `textArea` costs time even when idle.

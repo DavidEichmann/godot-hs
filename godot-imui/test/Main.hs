@@ -26,6 +26,8 @@ import qualified Godot.Api.Class.MenuBar as MenuBar
 import qualified Godot.Api.Class.MenuButton as MenuButton
 import qualified Godot.Api.Class.PopupMenu as PopupMenu
 import qualified Godot.Api.Class.Texture2D as Texture2D
+import qualified Godot.Api.Class.Theme as Theme
+import qualified Godot.Api.Class.ThemeDB as ThemeDB
 import qualified Godot.Api.Class.TextureRect as TextureRect
 import qualified Godot.Api.Class.Tree as Tree
 import qualified Godot.Api.Class.TreeItem as TreeItem
@@ -99,6 +101,19 @@ main = do
       Image.fill pixels (Color 1 0 0 1)
       _ <- Image.savePng pixels =<< toGString png
       release pixels
+    -- The generated theme loaded (Godot only logs an error if it does not).
+    when (f == 0) $ do
+      buttonStyle <- liftIO $ do
+        theme <- ThemeDB.getProjectTheme =<< ThemeDB.singleton
+        case theme of
+          Nothing -> pure False
+          Just t -> do
+            normal <- toStringName "normal"
+            buttonType <- toStringName "Button"
+            has <- Theme.hasStylebox t normal buttonType
+            release t
+            pure has
+      check "theme: the Modern theme is the project's theme" buttonStyle
     heading "Test" -- 0
     clicked <- button ("Count: " ++ show (count s)) -- 1
     name' <- placeholder "Name" (textInput (name s)) -- 2
