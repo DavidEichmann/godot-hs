@@ -30,7 +30,7 @@ r    <- Utility.sqrt 9                                -- 3.0
 
 | Module | Contents |
 |---|---|
-| `Godot.Api` | `initialize`, class/variant helpers, string conversions; re-exports the types below |
+| `Godot.Api` | `initialize`, class/variant helpers, string conversions, `newCallable`; re-exports the types below |
 | `Godot.Api.Classes` | one newtype per engine class (954 non-editor classes), the `Inherits` hierarchy, class enums (`Node_ProcessMode`, patterns `Node_PROCESS_MODE_INHERIT`, …) |
 | `Godot.Api.Class.<Name>` | that class's methods (`Node.getChild`, …), constants (`Node.NOTIFICATION_READY`), `construct` / `singleton` where applicable |
 | `Godot.Api.Builtin.Types` | builtin types: value types with a known layout are records (`Vector3 {vector3_x, …}`, `Color`, `Transform3D`, …); others are opaque, garbage-collected handles (`GString` for Godot's `String`, `StringName`, `Array`, `Dictionary`, …) |
@@ -53,6 +53,8 @@ Conventions:
 - Method binds are looked up on first call and cached. Call `initialize`
   first, and only use a class after Godot has registered it (scene classes
   after the scene initialization level / `GodotInstance.start`).
+- `newCallable` turns a Haskell function into a Godot `Callable`, e.g. to
+  connect to a signal: `Object.connect button pressed callback 0`.
 - Not (yet) covered: default arguments (all arguments are required),
   properties and signals as first-class values (use their getter/setter
   methods and `connect`/`emit_signal`), subclassing engine classes from
