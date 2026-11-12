@@ -1,3 +1,6 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# OPTIONS_GHC -Wno-ambiguous-fields #-}
+
 -- | A tour of godot-imui: cabal run godot-imui-example
 module Main (main) where
 
@@ -61,10 +64,10 @@ ui s0 = do
   -- Each tab's content is keyed, so that the widgets of one tab are not
   -- reused for another, and expands, to keep the footer at the bottom.
   s' <- case tab' of
-    0 -> keyed "widgets" (expand (vbox (widgetsTab s)))
-    1 -> keyed "todo" (expand (vbox (todoTab s)))
-    2 -> keyed "browse" (expand (vbox (browseTab s)))
-    _ -> keyed "notes" (expand (vbox (notesTab s)))
+    0 -> vboxWith vboxOpts {key = "widgets", expand = True} (widgetsTab s)
+    1 -> vboxWith vboxOpts {key = "todo", expand = True} (todoTab s)
+    2 -> vboxWith vboxOpts {key = "browse", expand = True} (browseTab s)
+    _ -> vboxWith vboxOpts {key = "notes", expand = True} (notesTab s)
   when (showFooter s') $ do
     separator
     hbox $ do
@@ -111,7 +114,7 @@ dialogs s = do
       else do
         ok <- dialog "About" $ do
           hbox $ do
-            minSize 64 64 (image (picture s))
+            imageWith imageOpts {minSize = (64, 64)} (picture s)
             vbox $ do
               heading "godot-imui"
               richText "A [b]simple[/b] immediate mode UI,\nrendered by [color=#6ab0f3]Godot[/color]."
@@ -136,7 +139,7 @@ widgetsTab s = do
     pure clicked
   s' <- panel $ grid 2 $ do
     label "Name"
-    name' <- placeholder "Your name" (textInput (name s))
+    name' <- textInputWith textInputOpts {placeholder = "Your name"} (name s)
     label "Volume"
     volume' <- slider (0, 100) (volume s)
     label "Copies"
@@ -160,13 +163,13 @@ widgetsTab s = do
 todoTab :: State -> UI State
 todoTab s = do
   (text', add) <- hbox $ do
-    text' <- placeholder "What needs doing?" (textInput (newTodo s))
-    add <- enabled (not (null text')) (button "Add")
+    text' <- textInputWith textInputOpts {placeholder = "What needs doing?"} (newTodo s)
+    add <- buttonWith buttonOpts {enabled = not (null text')} "Add"
     pure (text', add)
   -- One row per item, keyed so that each row's widgets stay with its item
   -- when an earlier one is removed.
   todos' <- scroll $ fmap concat $ forM (todos s) $ \todo ->
-    keyed (show (todoId todo)) $ hbox $ do
+    hboxWith hboxOpts {key = show (todoId todo)} $ do
       done <- checkbox (todoText todo) (todoDone todo)
       spacer
       remove <- button "Remove"
@@ -182,10 +185,10 @@ browseTab :: State -> UI State
 browseTab s = do
   (selected', choose) <-
     hsplit
-      (expand (tree library (selected s)))
+      (treeWith treeOpts {expand = True} library (selected s))
       ( do
           heading (maybe "Nothing selected" (titleAt library) (selected s))
-          expand (image (picture s))
+          imageWith imageOpts {expand = True} (picture s)
           hbox (spacer >> button "Choose picture...")
       )
   pure s {selected = selected', choosingPicture = choosingPicture s || choose}
@@ -206,6 +209,6 @@ titleAt forest path = case path of
 
 notesTab :: State -> UI State
 notesTab s = do
-  notes' <- expand (textArea (notes s))
+  notes' <- textAreaWith textAreaOpts {expand = True} (notes s)
   label (show (length (words notes')) ++ " words")
   pure s {notes = notes'}

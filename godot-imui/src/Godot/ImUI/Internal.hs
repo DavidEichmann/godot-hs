@@ -9,7 +9,7 @@
 -- each frame is reconciled against the controls created by the previous one:
 -- the widgets a block of 'UI' code creates are matched, in order, with the
 -- existing children of the enclosing container. A widget is reused if its
--- kind (and 'envKey') matches, created if it is new, and freed if the block
+-- kind (and 'attrKey') matches, created if it is new, and freed if the block
 -- no longer creates it. Properties are only sent to Godot when they change.
 --
 -- A new widget is typically a few lines:
@@ -29,7 +29,8 @@ module Godot.ImUI.Internal
   , Env (..)
   , Scope (..)
   , Attrs (..)
-  , localAttrs
+  , defaultAttrs
+  , withAttrs
   , getAttrs
   , afterFrame
 
@@ -124,9 +125,7 @@ data Env = Env
   { envScope :: !Scope
   -- ^ the container being filled
   , envAttrs :: !Attrs
-  -- ^ modifiers for the widgets created directly in this block
-  , envKey :: !String
-  -- ^ distinguishes widgets of the same kind (see 'Godot.ImUI.keyed')
+  -- ^ the options of the widget being created
   , envTree :: !SceneTree
   , envAfter :: !(IORef [IO ()])
   -- ^ what 'afterFrame' queued, last first
@@ -145,22 +144,24 @@ data Scope = Scope
   , scopeCount :: !(IORef Int64)
   }
 
--- | What the modifiers in "Godot.ImUI" set. 'attrEnabled' is inherited by
--- nested widgets; the rest only applies to the widgets created directly in
--- the modified block.
+-- | The options of a widget that 'widget' and 'node' apply to its node:
+-- the @expand@, @minSize@, @tooltip@ and @key@ options of "Godot.ImUI".
+-- Set them for a widget with 'withAttrs'; the widgets in a container start
+-- from 'defaultAttrs'.
 data Attrs = Attrs
-  { attrEnabled :: !Bool
-  , attrExpand :: !Bool
+  { attrExpand :: !Bool
   , attrMinSize :: !(Int, Int)
   , attrTooltip :: !String
-  , attrPlaceholder :: !String
+  , attrKey :: !String
+  -- ^ distinguishes widgets of the same kind in a container
   }
 
 defaultAttrs :: Attrs
-defaultAttrs = Attrs True False (0, 0) "" ""
+defaultAttrs = Attrs False (0, 0) "" ""
 
-localAttrs :: (Attrs -> Attrs) -> UI a -> UI a
-localAttrs f (UI body) = UI (\env -> body env {envAttrs = f (envAttrs env)})
+-- | Create widgets with these options.
+withAttrs :: Attrs -> UI a -> UI a
+withAttrs attrs (UI body) = UI (\env -> body env {envAttrs = attrs})
 
 getAttrs :: UI Attrs
 getAttrs = UI (pure . envAttrs)
@@ -188,8 +189,8 @@ data Widget = Widget
 newWidget :: String -> String -> Node -> IO Widget
 newWidget kind key n = Widget kind key n <$> newIORef [] <*> newIORef Map.empty
 
--- | How a kind of widget is sized by default. 'Godot.ImUI.expand' and
--- 'Godot.ImUI.minSize' override it.
+-- | How a kind of widget is sized by default. The @expand@ and @minSize@
+-- options override it.
 data Sizing = Sizing
   { growsHorizontally :: !Bool
   -- ^ take up spare horizontal space (e.g. a text field in a row)
@@ -214,12 +215,12 @@ widget kind sizing create = do
   pure (w, unsafeFromObjectPtr (toObjectPtr c))
 
 -- | Like 'widget', for nodes that are not controls (popups, windows, ...):
--- they are not laid out by their container, so the sizing modifiers do not
+-- they are not laid out by their container, so the sizing options do not
 -- apply to them.
 node :: forall c. Inherits c Node => String -> IO c -> UI (Widget, c)
 node kind create = UI $ \env -> do
   let sc = envScope env
-      key = envKey env
+      key = attrKey (envAttrs env)
       parent = wNode (scopeWidget sc)
   old <- readIORef (scopeOld sc)
   n <- readIORef (scopeCount sc)
@@ -238,7 +239,7 @@ node kind create = UI $ \env -> do
   writeIORef (scopeCount sc) (n + 1)
   pure (w, unsafeFromObjectPtr (toObjectPtr (wNode w)))
 
--- | Size and tooltip, from the widget's defaults and the modifiers in scope.
+-- | Size and tooltip, from the widget's defaults and its options.
 applyAttrs :: Widget -> Control -> Sizing -> UI ()
 applyAttrs w c sizing = do
   attrs <- getAttrs
@@ -275,8 +276,7 @@ children horizontal w (UI body) = UI $ \env -> do
     body
       env
         { envScope = sc
-        , envAttrs = defaultAttrs {attrEnabled = attrEnabled (envAttrs env)}
-        , envKey = ""
+        , envAttrs = defaultAttrs
         }
   unused <- readIORef (scopeOld sc)
   mapM_ (\u -> Node.removeChild parent (wNode u) >> Node.queueFree (wNode u)) unused
@@ -452,7 +452,7 @@ runUIWith extraArgs win initial frame = do
           -- 'children' replaces this scope with a fresh one for each frame.
           outside <- Scope root False <$> newIORef [] <*> newIORef [] <*> newIORef 0
           after <- newIORef []
-          let env = Env {envScope = outside, envAttrs = defaultAttrs, envKey = "", envTree = tree, envAfter = after}
+          let env = Env {envScope = outside, envAttrs = defaultAttrs, envTree = tree, envAfter = after}
               loop s = do
                 s' <- unUI (children False root (frame s)) env
                 sequence_ . reverse =<< atomicModifyIORef' after (\queued -> ([], queued))

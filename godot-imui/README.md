@@ -31,6 +31,8 @@ state every frame, until the window is closed or `quit` is called. `ui`
 describes the interface and returns the next state.
 
 ```haskell
+{-# LANGUAGE DuplicateRecordFields #-}
+
 import Data.Char (toUpper)
 import Godot.ImUI
 
@@ -40,7 +42,7 @@ ui :: State -> UI State
 ui s = do
   name' <- hbox $ do
     label "Name:"
-    placeholder "Your name" (textInput (name s))
+    textInputWith textInputOpts {placeholder = "Your name"} (name s)
   shout' <- checkbox "Shout" (shout s)
   let greeting = "Hello, " ++ name' ++ "!"
   label (if shout' then map toUpper greeting else greeting)
@@ -53,6 +55,9 @@ main = runUI defaultWindow {windowTitle = "Greeter"} (State "" False) ui
 - Widgets that edit a value take the current value and return the new one.
   What a widget shows is always the value you pass it: return the state
   unchanged and the edit is undone.
+- Each widget has a variant ending in `With` that takes its options, such
+  as `buttonWith buttonOpts {enabled = False} "OK"` (see
+  [Options](#options)).
 - Ordinary control flow decides what is shown: `when`, `case`, `forM`, ...
   Widgets that are not created in a frame disappear.
 - `WindowConfig` sets the window's title, size and look:
@@ -141,22 +146,39 @@ Containers take a block of widgets and return its result. The top level is a
 | `center` | centres its content in the space left |
 | `padding n` | `n` pixels of empty space around the content |
 
-### Modifiers
+### Options
 
-Modifiers wrap a block and apply to the widgets created directly in it:
-
-| Modifier | Description |
-| --- | --- |
-| `enabled False` | grey out (also applies to nested widgets) |
-| `expand` | grow to take the space left in the container |
-| `minSize w h` | minimum size in pixels |
-| `tooltip "..."` | text shown on hover |
-| `placeholder "..."` | hint in empty text fields |
-| `keyed "..."` | identity, see below |
+Each widget function has a variant ending in `With` that takes the widget's
+options first: a record of type `ButtonOpts`, `TextInputOpts`, ..., written
+as the defaults (`buttonOpts`, `textInputOpts`, ...) with the options you
+want changed:
 
 ```haskell
-ok <- enabled (not (null name)) (tooltip "Save and close" (button "OK"))
+ok <- buttonWith buttonOpts {enabled = not (null name), tooltip = "Save and close"} "OK"
 ```
+
+Every widget `foo` has its options type `FooOpts` and defaults `fooOpts`.
+Variants of a widget share a record, and their names are aliases:
+`ParagraphOpts` is `LabelOpts`, `LinkOpts` is `ButtonOpts`, `HBoxOpts` is
+`BoxOpts`, `ConfirmOpts` is `DialogOpts`, ... Most widgets have these
+options:
+
+| Option | Description |
+| --- | --- |
+| `enabled :: Bool` | `False` greys out the widget (not the ones in a container) |
+| `expand :: Bool` | grow to take the space left in the container |
+| `minSize :: (Int, Int)` | minimum width and height in pixels |
+| `tooltip :: String` | text shown on hover |
+| `key :: String` | identity, see below |
+
+and `textInput` and `textArea` have a `placeholder`, the hint shown while
+they are empty.
+
+The option records share field names, so a module that sets options needs
+`DuplicateRecordFields`. GHC knows which record an update is of from the
+`With` function it is passed to, but warns that it will stop doing that in
+a future version (`-Wambiguous-fields`); turn the warning off with
+`{-# OPTIONS_GHC -Wno-ambiguous-fields #-}`.
 
 ### Widget identity
 
@@ -169,8 +191,10 @@ identifies the item, so that the controls follow the items:
 
 ```haskell
 forM items $ \item ->
-  keyed (show (itemId item)) $ hbox $ do ...
+  hboxWith hboxOpts {key = show (itemId item)} $ do ...
 ```
+
+The widgets inside a keyed container go with it.
 
 ## How it works
 
@@ -230,6 +254,7 @@ link text = do
   (Godot cannot be restarted). Link with `-threaded`.
 - No custom drawing, keyboard shortcuts for menu items, icons on buttons or
   multi-column trees yet, and no styling beyond the three themes.
+- `enabled` cannot disable a whole group of widgets at once: set it on each.
 - File dialogs are Godot's own, not the desktop's.
 - Widget values are read back from Godot every frame, so a very large
   `textArea` costs time even when idle.

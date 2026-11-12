@@ -1,6 +1,8 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# OPTIONS_GHC -Wno-ambiguous-fields #-}
 
 -- | Runs a UI headless for a few frames. Between frames it plays the user
 -- by poking the Godot controls directly (emitting a button's @pressed@
@@ -116,7 +118,7 @@ main = do
       check "theme: the Modern theme is the project's theme" buttonStyle
     heading "Test" -- 0
     clicked <- button ("Count: " ++ show (count s)) -- 1
-    name' <- placeholder "Name" (textInput (name s)) -- 2
+    name' <- textInputWith textInputOpts {placeholder = "Name"} (name s) -- 2
     checked' <- checkbox "Check" (checked s) -- 3
     volume' <- slider (0, 10) (volume s) -- 4
     copies' <- spinBox (1, 5) (copies s) -- 5
@@ -130,19 +132,19 @@ main = do
       label "Row"
       when (f == 3) (label "only in frame 3")
       separator
-      disabledClick <- enabled False (button "Disabled")
+      disabledClick <- buttonWith buttonOpts {enabled = False} "Disabled"
       check "a disabled button is never clicked" (not disabledClick)
       spacer
-    -- 12: nested containers and modifiers
-    expand $ scroll $ panel $ grid 2 $ do
+    -- 12: nested containers and options
+    scrollWith scrollOpts {expand = True} $ panel $ grid 2 $ do
       label "A"
-      _ <- tooltip "tip" (minSize 80 0 (button "B"))
+      _ <- buttonWith buttonOpts {tooltip = "tip", minSize = (80, 0)} "B"
       center (paragraph "C")
       padding 4 (label "D")
     -- 13: the rest of the widgets
     extra' <- vbox (extras check png f (extra s))
     -- 14..: keyed items, reordered in frame 6
-    forM_ (items s) $ \item -> keyed item (textInput item)
+    forM_ (items s) $ \item -> textInputWith textInputOpts {key = item} item
 
     box <- liftIO rootBox
     let base = 14
@@ -271,7 +273,7 @@ extras check png f x = do
       menuSeparator
       wrap' <- menuCheck "Wrap" (wrap x)
       recent <- menu "Recent" (menuItem "a.txt")
-      _ <- enabled False (menuItem "Disabled")
+      _ <- menuItemWith menuItemOpts {enabled = False} "Disabled"
       pure (open, wrap', recent)
     about <- menu "Help" (menuItem "About")
     check "menu: an item that was not chosen is not reported" (not about)
