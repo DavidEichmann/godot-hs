@@ -25,54 +25,54 @@
 -- @
 module Godot.ImUI.Internal
   ( -- * The UI monad
-    UI (..)
-  , Env (..)
-  , Scope (..)
-  , Attrs (..)
-  , defaultAttrs
-  , withAttrs
-  , getAttrs
-  , afterFrame
+    UI (..),
+    Env (..),
+    Scope (..),
+    Attrs (..),
+    defaultAttrs,
+    withAttrs,
+    getAttrs,
+    afterFrame,
+    state,
 
     -- * Widgets
-  , Widget (..)
-  , Sizing (..)
-  , natural
-  , widget
-  , node
-  , container
-  , children
-  , contentRoot
-  , prop
-  , forget
-  , controlled
-  , state
-  , fired
-  , events
-  , release
+    Widget (..),
+    Sizing (..),
+    natural,
+    widget,
+    node,
+    container,
+    children,
+    contentRoot,
+    prop,
+    forget,
+    controlled,
+    widgetState,
+    fired,
+    events,
+    release,
 
     -- * Running
-  , WindowConfig (..)
-  , defaultWindow
-  , Theme (..)
-  , runUI
-  , runUIWith
-  , quit
-  ) where
+    WindowConfig (..),
+    defaultWindow,
+    Theme (..),
+    runUI,
+    runUIWith,
+    quit,
+  )
+where
 
 import Control.Exception (finally, throwIO, try)
 import Control.Monad (unless, when)
 import Control.Monad.IO.Class (MonadIO (..))
 import Data.Dynamic (Dynamic, Typeable, fromDynamic, toDyn)
 import Data.IORef
-import Godot.ImUI.Theme (Theme (..), backgroundType, themeClearColor, themeResource)
 import Data.Int (Int64)
 import qualified Data.Map.Strict as Map
 import Foreign.Ptr (freeHaskellFunPtr, nullPtr)
 import Foreign.Storable (poke)
 import GHC.Clock (getMonotonicTimeNSec)
 import Godot.Api hiding (Theme)
-import Godot.Api.Internal (getInterface)
 import qualified Godot.Api.Class.Control as Control
 import qualified Godot.Api.Class.DisplayServer as DisplayServer
 import qualified Godot.Api.Class.Engine as Engine
@@ -84,13 +84,15 @@ import qualified Godot.Api.Class.PanelContainer as PanelContainer
 import qualified Godot.Api.Class.RefCounted as RefCounted
 import qualified Godot.Api.Class.SceneTree as SceneTree
 import qualified Godot.Api.Class.VBoxContainer as VBoxContainer
+import Godot.Api.Internal (getInterface)
 import qualified Godot.GDExtension as GDE
+import Godot.ImUI.Theme (Theme (..), backgroundType, themeClearColor, themeResource)
 import System.Directory
-  ( createDirectory
-  , getCurrentDirectory
-  , getTemporaryDirectory
-  , removeDirectoryRecursive
-  , setCurrentDirectory
+  ( createDirectory,
+    getCurrentDirectory,
+    getTemporaryDirectory,
+    removeDirectoryRecursive,
+    setCurrentDirectory,
   )
 import System.Environment (getProgName)
 import System.FilePath ((</>))
@@ -122,26 +124,28 @@ instance MonadFail UI where
   fail = liftIO . fail
 
 data Env = Env
-  { envScope :: !Scope
-  -- ^ the container being filled
-  , envAttrs :: !Attrs
-  -- ^ the options of the widget being created
-  , envTree :: !SceneTree
-  , envAfter :: !(IORef [IO ()])
-  -- ^ what 'afterFrame' queued, last first
+  { -- | the container being filled
+    envScope :: !Scope,
+    -- | the options of the widget being created
+    envAttrs :: !Attrs,
+    envTree :: !SceneTree,
+    -- | what 'afterFrame' queued, last first
+    envAfter :: !(IORef [IO ()])
   }
 
 -- | The children of a container, while they are being reconciled.
 data Scope = Scope
-  { scopeWidget :: !Widget
-  -- ^ the container
-  , scopeHorizontal :: !Bool
-  -- ^ does the container lay its children out left to right?
-  , scopeOld :: !(IORef [Widget])
-  -- ^ last frame's children not reused yet, in tree order
-  , scopeNew :: !(IORef [Widget])
-  -- ^ this frame's children so far, last first
-  , scopeCount :: !(IORef Int64)
+  { -- | the container
+    scopeWidget :: !Widget,
+    -- | does the container lay its children out left to right?
+    scopeHorizontal :: !Bool,
+    -- | last frame's children not reused yet, in tree order
+    scopeOld :: !(IORef [Widget]),
+    -- | this frame's children so far, last first
+    scopeNew :: !(IORef [Widget]),
+    scopeCount :: !(IORef Int64),
+    -- | the number of 'state's created in the container so far this frame
+    scopeStates :: !(IORef Int)
   }
 
 -- | The options of a widget that 'widget' and 'node' apply to its node:
@@ -149,11 +153,11 @@ data Scope = Scope
 -- Set them for a widget with 'withAttrs'; the widgets in a container start
 -- from 'defaultAttrs'.
 data Attrs = Attrs
-  { attrExpand :: !Bool
-  , attrMinSize :: !(Int, Int)
-  , attrTooltip :: !String
-  , attrKey :: !String
-  -- ^ distinguishes widgets of the same kind in a container
+  { attrExpand :: !Bool,
+    attrMinSize :: !(Int, Int),
+    attrTooltip :: !String,
+    -- | distinguishes widgets of the same kind in a container
+    attrKey :: !String
   }
 
 defaultAttrs :: Attrs
@@ -165,6 +169,45 @@ withAttrs attrs (UI body) = UI (\env -> body env {envAttrs = attrs})
 
 getAttrs :: UI Attrs
 getAttrs = UI (pure . envAttrs)
+
+-- | A piece of state kept from frame to frame, like React's @useState@:
+-- takes the initial value and returns the current value and a function to
+-- set it. What it is set to is the value from the next frame on.
+--
+-- @
+-- counter :: UI ()
+-- counter = 'Godot.ImUI.hbox' $ do
+--   (count, setCount) <- state (0 :: Int)
+--   clicked <- 'Godot.ImUI.button' \"+1\"
+--   when clicked (liftIO (setCount (count + 1)))
+--   'Godot.ImUI.label' (show count)
+-- @
+--
+-- The state belongs to the container it is created in (the 'Godot.ImUI.hbox'
+-- above), and is matched from frame to frame by its position among the
+-- states created in that container. So, as with React's hooks:
+--
+-- * Create a container's states in the same order every frame: not under
+--   a condition that changes, unless they are in a container of their own.
+-- * The state is lost when its container is no longer created, and starts
+--   again from the initial value if it is created again. Use a container's
+--   @key@ to keep the state of an item of a list with its item.
+state :: (Typeable a) => a -> UI (a, a -> IO ())
+state initial = UI $ \env -> do
+  let sc = envScope env
+      w = scopeWidget sc
+  i <- readIORef (scopeStates sc)
+  writeIORef (scopeStates sc) (i + 1)
+  props <- readIORef (wProps w)
+  ref <- case Map.lookup (stateName i) props >>= fromDynamic of
+    Just ref -> pure ref
+    -- New, or of another type (the block changed): start again.
+    Nothing -> do
+      ref <- newIORef initial
+      modifyIORef' (wProps w) (Map.insert (stateName i) (toDyn ref))
+      pure ref
+  current <- readIORef ref
+  pure (current, writeIORef ref)
 
 -- | An action that runs the given one once the whole UI function has run
 -- for this frame, and the widgets it no longer creates are gone. (For
@@ -178,12 +221,12 @@ afterFrame = UI (\env -> pure (\action -> modifyIORef' (envAfter env) (action :)
 -- | A retained Godot node (usually a control), with what was last sent to
 -- it.
 data Widget = Widget
-  { wKind :: !String
-  , wKey :: !String
-  , wNode :: !Node
-  , wChildren :: !(IORef [Widget])
-  , wProps :: !(IORef (Map.Map String Dynamic))
-  -- ^ the last value of each 'prop', and each 'state'
+  { wKind :: !String,
+    wKey :: !String,
+    wNode :: !Node,
+    wChildren :: !(IORef [Widget]),
+    -- | the last value of each 'prop', and each 'state'
+    wProps :: !(IORef (Map.Map String Dynamic))
   }
 
 newWidget :: String -> String -> Node -> IO Widget
@@ -192,10 +235,10 @@ newWidget kind key n = Widget kind key n <$> newIORef [] <*> newIORef Map.empty
 -- | How a kind of widget is sized by default. The @expand@ and @minSize@
 -- options override it.
 data Sizing = Sizing
-  { growsHorizontally :: !Bool
-  -- ^ take up spare horizontal space (e.g. a text field in a row)
-  , growsVertically :: !Bool
-  , defaultMinSize :: !(Int, Int)
+  { -- | take up spare horizontal space (e.g. a text field in a row)
+    growsHorizontally :: !Bool,
+    growsVertically :: !Bool,
+    defaultMinSize :: !(Int, Int)
   }
 
 -- | As small as the content allows.
@@ -208,7 +251,7 @@ natural = Sizing False False (0, 0)
 --
 -- The kind identifies the widget type and how it was set up; widgets of
 -- different kinds are never reused for each other.
-widget :: forall c. Inherits c Control => String -> Sizing -> IO c -> UI (Widget, c)
+widget :: forall c. (Inherits c Control) => String -> Sizing -> IO c -> UI (Widget, c)
 widget kind sizing create = do
   (w, c) <- node kind (upcast @Control <$> create)
   applyAttrs w c sizing
@@ -217,7 +260,7 @@ widget kind sizing create = do
 -- | Like 'widget', for nodes that are not controls (popups, windows, ...):
 -- they are not laid out by their container, so the sizing options do not
 -- apply to them.
-node :: forall c. Inherits c Node => String -> IO c -> UI (Widget, c)
+node :: forall c. (Inherits c Node) => String -> IO c -> UI (Widget, c)
 node kind create = UI $ \env -> do
   let sc = envScope env
       key = attrKey (envAttrs env)
@@ -252,16 +295,16 @@ applyAttrs w c sizing = do
   prop w "imui:tooltip" (attrTooltip attrs) (\t -> toGString t >>= Control.setTooltipText c)
 
 -- | A widget whose children are the widgets created by the given block.
-container
-  :: forall c a
-   . Inherits c Control
-  => String
-  -> Bool
-  -- ^ lays its children out left to right?
-  -> Sizing
-  -> IO c
-  -> UI a
-  -> UI a
+container ::
+  forall c a.
+  (Inherits c Control) =>
+  String ->
+  -- | lays its children out left to right?
+  Bool ->
+  Sizing ->
+  IO c ->
+  UI a ->
+  UI a
 container kind horizontal sizing create body = do
   (w, _ :: c) <- widget kind sizing create
   children horizontal w body
@@ -271,17 +314,26 @@ container kind horizontal sizing create body = do
 children :: Bool -> Widget -> UI a -> UI a
 children horizontal w (UI body) = UI $ \env -> do
   let parent = wNode w
-  sc <- Scope w horizontal <$> (newIORef =<< readIORef (wChildren w)) <*> newIORef [] <*> newIORef 0
+  sc <- Scope w horizontal <$> (newIORef =<< readIORef (wChildren w)) <*> newIORef [] <*> newIORef 0 <*> newIORef 0
   a <-
     body
       env
-        { envScope = sc
-        , envAttrs = defaultAttrs
+        { envScope = sc,
+          envAttrs = defaultAttrs
         }
   unused <- readIORef (scopeOld sc)
   mapM_ (\u -> Node.removeChild parent (wNode u) >> Node.queueFree (wNode u)) unused
   writeIORef (wChildren w) . reverse =<< readIORef (scopeNew sc)
+  -- Drop the states the block no longer creates.
+  n <- readIORef (scopeStates sc)
+  props <- readIORef (wProps w)
+  let before = maybe 0 id (Map.lookup "states" props >>= fromDynamic) :: Int
+  when (n /= before) $
+    writeIORef (wProps w) (foldr (Map.delete . stateName) (Map.insert "states" (toDyn n) props) [n .. before - 1])
   pure a
+
+stateName :: Int -> String
+stateName i = "state#" ++ show i
 
 -- | Fill a window with a themed background, a margin and a vertical box,
 -- and return the box as a widget whose 'children' are the window's content.
@@ -336,8 +388,8 @@ controlled w model get set = liftIO $ do
 
 -- | Haskell-side state that lives as long as the widget, made by the given
 -- action the first time. The name only has to be unique within the widget.
-state :: Typeable s => Widget -> String -> IO s -> UI s
-state w name create = liftIO $ do
+widgetState :: (Typeable s) => Widget -> String -> IO s -> UI s
+widgetState w name create = liftIO $ do
   props <- readIORef (wProps w)
   case Map.lookup key props >>= fromDynamic of
     Just s -> pure s
@@ -352,9 +404,9 @@ state w name create = liftIO $ do
 -- first, each decoded from the signal's arguments by the given function
 -- (which runs when the signal is emitted). Connects to the signal the first
 -- time, so that always returns none.
-events :: Typeable e => Widget -> String -> ([Variant] -> IO e) -> UI [e]
+events :: (Typeable e) => Widget -> String -> ([Variant] -> IO e) -> UI [e]
 events w signal decode = do
-  queue <- state w ("signal:" ++ signal) $ do
+  queue <- widgetState w ("signal:" ++ signal) $ do
     queue <- newIORef []
     name <- toStringName signal
     callback <- newCallable (\args -> decode args >>= \e -> modifyIORef' queue (e :))
@@ -369,7 +421,7 @@ fired w signal = not . null <$> events w signal (\_ -> pure ())
 
 -- | Give up a reference to a reference counted object, such as the ones
 -- Godot's methods return. (godot-low does not count references itself.)
-release :: Inherits a RefCounted => a -> IO ()
+release :: (Inherits a RefCounted) => a -> IO ()
 release object = do
   unused <- RefCounted.unreference object
   when unused $ do
@@ -381,11 +433,11 @@ release object = do
 
 -- | The application's window.
 data WindowConfig = WindowConfig
-  { windowTitle :: String
-  , windowSize :: (Int, Int)
-  -- ^ initial width and height, in pixels
-  , windowTheme :: Theme
-  -- ^ the look of the controls
+  { windowTitle :: String,
+    -- | initial width and height, in pixels
+    windowSize :: (Int, Int),
+    -- | the look of the controls
+    windowTheme :: Theme
   }
 
 -- | A 640x480 window titled after the program, in the dark 'ModernDark'
@@ -396,25 +448,25 @@ defaultWindow = WindowConfig {windowTitle = "", windowSize = (640, 480), windowT
 -- | Open a window and run the UI in it until it is closed (or 'quit' is
 -- called).
 --
--- The function is given the application's state, describes the UI for it,
--- and returns the state for the next frame:
+-- The UI runs every frame, and keeps its state with 'state':
 --
 -- @
 -- main :: IO ()
--- main = runUI defaultWindow (0 :: Int) $ \\count -> do
+-- main = runUI defaultWindow $ do
+--   (count, setCount) <- state (0 :: Int)
 --   label (\"Count: \" ++ show count)
 --   clicked <- button \"Increment\"
---   pure (if clicked then count + 1 else count)
+--   when clicked (liftIO (setCount (count + 1)))
 -- @
 --
 -- The top-level widgets are stacked vertically. Call this from the main
 -- thread, and only once: Godot cannot be started again in the same process.
-runUI :: WindowConfig -> s -> (s -> UI s) -> IO ()
+runUI :: WindowConfig -> UI () -> IO ()
 runUI = runUIWith []
 
 -- | 'runUI' with extra Godot command line arguments (e.g. @--headless@).
-runUIWith :: [String] -> WindowConfig -> s -> (s -> UI s) -> IO ()
-runUIWith extraArgs win initial frame = do
+runUIWith :: [String] -> WindowConfig -> UI () -> IO ()
+runUIWith extraArgs win frame = do
   again <- atomicModifyIORef' alreadyRun (\r -> (True, r))
   when again $ fail "Godot.ImUI.runUI: Godot can only be started once per process"
   progName <- getProgName
@@ -427,10 +479,10 @@ runUIWith extraArgs win initial frame = do
     poke
       rInit
       GDE.GDExtensionInitialization
-        { GDE.gdExtensionInitialization_minimum_initialization_level = GDE.GDEXTENSION_INITIALIZATION_CORE
-        , GDE.gdExtensionInitialization_userdata = nullPtr
-        , GDE.gdExtensionInitialization_initialize = onLevel
-        , GDE.gdExtensionInitialization_deinitialize = onLevel
+        { GDE.gdExtensionInitialization_minimum_initialization_level = GDE.GDEXTENSION_INITIALIZATION_CORE,
+          GDE.gdExtensionInitialization_userdata = nullPtr,
+          GDE.gdExtensionInitialization_initialize = onLevel,
+          GDE.gdExtensionInitialization_deinitialize = onLevel
         }
     pure 1
   project <- createProject title (windowSize win) (windowTheme win)
@@ -450,15 +502,15 @@ runUIWith extraArgs win initial frame = do
           setCurrentDirectory cwd
           (tree, root) <- setupRoot title
           -- 'children' replaces this scope with a fresh one for each frame.
-          outside <- Scope root False <$> newIORef [] <*> newIORef [] <*> newIORef 0
+          outside <- Scope root False <$> newIORef [] <*> newIORef [] <*> newIORef 0 <*> newIORef 0
           after <- newIORef []
           let env = Env {envScope = outside, envAttrs = defaultAttrs, envTree = tree, envAfter = after}
-              loop s = do
-                s' <- unUI (children False root (frame s)) env
+              loop = do
+                unUI (children False root frame) env
                 sequence_ . reverse =<< atomicModifyIORef' after (\queued -> ([], queued))
                 stop <- GodotInstance.iteration inst
-                unless stop (loop s')
-          loop initial
+                unless stop loop
+          loop
         )
         `finally` GDE.destroyGodotInstance instPtr
     )
@@ -512,49 +564,49 @@ createProject title (width, height) theme = do
       writeFile (dir </> "theme.tres") resource
       pure
         [ -- The background, seen while the window is resized.
-          "environment/defaults/default_clear_color=" ++ background
-        , ""
-        , "[gui]"
-        , "theme/custom=\"res://theme.tres\""
+          "environment/defaults/default_clear_color=" ++ background,
+          "",
+          "[gui]",
+          "theme/custom=\"res://theme.tres\""
         ]
     _ -> pure []
   writeFile (dir </> "project.godot") . unlines $
-    [ "config_version=5"
-    , ""
-    , "[application]"
-    , "config/name=" ++ quoted title
-    , -- One user data directory (shader cache etc.) for all godot-imui
+    [ "config_version=5",
+      "",
+      "[application]",
+      "config/name=" ++ quoted title,
+      -- One user data directory (shader cache etc.) for all godot-imui
       -- programs, rather than one per window title.
-      "config/use_custom_user_dir=true"
-    , "config/custom_user_dir_name=\"godot-imui\""
-    , "run/main_scene=\"res://main.tscn\""
-    , -- Only redraw when something changed.
-      "run/low_processor_mode=true"
-    , -- ... and poll at about 100 Hz in between (the default is 144 Hz).
-      "run/low_processor_mode_sleep_usec=10000"
-    , "boot_splash/show_image=false"
-    , ""
-    , "[debug]"
-    , "file_logging/enable_file_logging=false"
-    , "file_logging/enable_file_logging.pc=false"
-    , ""
-    , "[rendering]"
-    , -- Godot's OpenGL renderer, which is plenty for 2D UI. It renders on
+      "config/use_custom_user_dir=true",
+      "config/custom_user_dir_name=\"godot-imui\"",
+      "run/main_scene=\"res://main.tscn\"",
+      -- Only redraw when something changed.
+      "run/low_processor_mode=true",
+      -- ... and poll at about 100 Hz in between (the default is 144 Hz).
+      "run/low_processor_mode_sleep_usec=10000",
+      "boot_splash/show_image=false",
+      "",
+      "[debug]",
+      "file_logging/enable_file_logging=false",
+      "file_logging/enable_file_logging.pc=false",
+      "",
+      "[rendering]",
+      -- Godot's OpenGL renderer, which is plenty for 2D UI. It renders on
       -- the GPU that drives the desktop. Godot's default Vulkan renderer
       -- prefers a discrete GPU, and on hybrid graphics laptops (desktop
       -- on the integrated GPU) presenting its frames across GPUs can
       -- freeze the whole X server, especially while the window is moved
       -- or resized. It also starts faster and uses less memory.
-      "renderer/rendering_method=\"gl_compatibility\""
-    , "renderer/rendering_method.mobile=\"gl_compatibility\""
+      "renderer/rendering_method=\"gl_compatibility\"",
+      "renderer/rendering_method.mobile=\"gl_compatibility\""
     ]
       ++ themeSettings
-      ++ [ ""
-         , "[display]"
-         , -- Dialogs and menus are windows of their own.
-           "window/subwindows/embed_subwindows=false"
-         , "window/size/viewport_width=" ++ show width
-         , "window/size/viewport_height=" ++ show height
+      ++ [ "",
+           "[display]",
+           -- Dialogs and menus are windows of their own.
+           "window/subwindows/embed_subwindows=false",
+           "window/size/viewport_width=" ++ show width,
+           "window/size/viewport_height=" ++ show height
          ]
   writeFile (dir </> "main.tscn") $
     unlines ["[gd_scene format=3]", "", "[node name=\"Main\" type=\"Node\"]"]

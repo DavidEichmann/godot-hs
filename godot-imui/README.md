@@ -4,19 +4,20 @@ A simple immediate mode UI library for Haskell, rendered by Godot (through
 [godot-low](../godot-low)).
 
 ```haskell
+import Control.Monad (when)
 import Godot.ImUI
 
 main :: IO ()
-main = runUI defaultWindow (0 :: Int) $ \count -> do
+main = runUI defaultWindow $ do
+  (count, setCount) <- state (0 :: Int)
   label ("Count: " ++ show count)
   clicked <- button "Increment"
-  pure (if clicked then count + 1 else count)
+  when clicked (liftIO (setCount (count + 1)))
 ```
 
 - **Code first.** That is the whole program: there is no Godot project,
   scene or editor involved.
-- **Immediate mode.** The UI is a function of your state that runs every
-  frame. Widgets return what the user did (`button` returns whether it was
+- **Immediate mode.** The UI is code that runs every frame. Widgets return what the user did (`button` returns whether it was
   clicked), so there are no callbacks and nothing to keep in sync.
 - **UI only.** Godot is a full game engine; this exposes just its 2D UI
   controls.
@@ -26,9 +27,11 @@ Run the tour of the widgets with `cabal run godot-imui-example`
 
 ## Using it
 
-`runUI window initialState ui` opens a window and calls `ui` with the current
-state every frame, until the window is closed or `quit` is called. `ui`
-describes the interface and returns the next state.
+`runUI window ui` opens a window and runs `ui`, which describes the
+interface, every frame until the window is closed or `quit` is called. The
+UI keeps its state with `state`, like React's `useState`: `state initial`
+returns the current value and a function that sets it, from the next frame
+on (see [State](#state)).
 
 ```haskell
 {-# LANGUAGE DuplicateRecordFields #-}
@@ -36,25 +39,25 @@ describes the interface and returns the next state.
 import Data.Char (toUpper)
 import Godot.ImUI
 
-data State = State {name :: String, shout :: Bool}
-
-ui :: State -> UI State
-ui s = do
+ui :: UI ()
+ui = do
+  (name, setName) <- state ""
+  (shout, setShout) <- state False
   name' <- hbox $ do
     label "Name:"
-    textInputWith textInputOpts {placeholder = "Your name"} (name s)
-  shout' <- checkbox "Shout" (shout s)
+    textInputWith textInputOpts {placeholder = "Your name"} name
+  shout' <- checkbox "Shout" shout
+  liftIO (setName name' >> setShout shout')
   let greeting = "Hello, " ++ name' ++ "!"
   label (if shout' then map toUpper greeting else greeting)
-  pure s {name = name', shout = shout'}
 
 main :: IO ()
-main = runUI defaultWindow {windowTitle = "Greeter"} (State "" False) ui
+main = runUI defaultWindow {windowTitle = "Greeter"} ui
 ```
 
 - Widgets that edit a value take the current value and return the new one.
-  What a widget shows is always the value you pass it: return the state
-  unchanged and the edit is undone.
+  What a widget shows is always the value you pass it: don't keep the new
+  value and the edit is undone.
 - Each widget has a variant ending in `With` that takes its options, such
   as `buttonWith buttonOpts {enabled = False} "OK"` (see
   [Options](#options)).
@@ -65,8 +68,29 @@ main = runUI defaultWindow {windowTitle = "Greeter"} (State "" False) ui
   The themes are `ModernDark` (the default), `ModernLight` and
   `GodotDefault` (see [The look](#the-look)).
 - `UI` is a `MonadIO`, so `liftIO` runs any `IO` (keep it short: it runs on
-  the UI thread, every frame unless you guard it). If you prefer mutable
-  state, use `()` as the state and keep yours in `IORef`s.
+  the UI thread, every frame unless you guard it).
+
+### State
+
+A part of the UI can keep its own state, such as this counter:
+
+```haskell
+counter :: UI ()
+counter = hbox $ do
+  (count, setCount) <- state (0 :: Int)
+  clicked <- button "+1"
+  when clicked (liftIO (setCount (count + 1)))
+  label (show count)
+```
+
+A state belongs to the container it is created in, and is matched from frame
+to frame by the order in which that container creates its states. So, as
+with React's hooks, create them in the same order every frame (not under a
+condition that changes, unless they are in a container of their own). The
+state is gone when its container is no longer created, and starts from the
+initial value if it is created again: the `counter` above starts again
+from 0 when it is hidden and shown. Key a list item's container to keep its
+state with the item.
 
 ### Widgets
 
@@ -110,7 +134,7 @@ menuBar $ do
 ### Dialogs
 
 A dialog is a window of its own that is open for as long as you create it:
-keep whether it is open in your state.
+keep whether it is open in a `state`.
 
 ```haskell
 answer <- if asking then confirm "Delete" "Delete this item?" else pure Nothing

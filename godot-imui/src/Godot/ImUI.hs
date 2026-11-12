@@ -4,18 +4,19 @@
 
 -- | A simple immediate mode UI, rendered by Godot.
 --
--- The UI is a function from your application's state to a 'UI' action that
--- returns the next state. It runs every frame: each widget shows itself and
--- returns what the user did with it.
+-- The UI is a 'UI' action that runs every frame: each widget shows itself
+-- and returns what the user did with it. It keeps its state with 'state'.
 --
 -- @
+-- import Control.Monad (when)
 -- import Godot.ImUI
 --
 -- main :: IO ()
--- main = 'runUI' 'defaultWindow' (0 :: Int) $ \\count -> do
+-- main = 'runUI' 'defaultWindow' $ do
+--   (count, setCount) <- 'state' (0 :: Int)
 --   'label' (\"Count: \" ++ show count)
 --   clicked <- 'button' \"Increment\"
---   pure (if clicked then count + 1 else count)
+--   when clicked ('liftIO' (setCount (count + 1)))
 -- @
 --
 -- * Widgets that edit a value take the current value and return the new
@@ -36,6 +37,7 @@ module Godot.ImUI
   , UI
   , quit
   , liftIO
+  , state
 
     -- * Options #options#
     -- $options
@@ -974,7 +976,7 @@ treeWith TreeOpts {..} forest selected = layout tooltip expand minSize key $ do
     pure t
   -- Godot's tree items, mirrored so that only what changed is updated
   -- (which keeps the items the user collapsed collapsed).
-  items <- state w "items" $ do
+  items <- widgetState w "items" $ do
     Just root <- Tree.createItem t (unsafeFromObjectPtr nullObjectPtr) (-1)
     newIORef (TreeNode root "" [])
   prop w "forest" forest $ \new -> do
@@ -1105,7 +1107,7 @@ menuWith MenuOpts {..} title body = layout tooltip expand minSize key $ do
       syncText w title (Button.setText b)
       enable w enabled (BaseButton.setDisabled b . not)
       -- The button has a popup of its own, which holds the items.
-      popup <- state w "popup" $ do
+      popup <- widgetState w "popup" $ do
         Just popup <- MenuButton.getPopup b
         Widget "PopupMenu" "" (upcast popup) <$> newIORef [] <*> newIORef mempty
       menuItems popup (unsafeFromObjectPtr (toObjectPtr (wNode popup))) body
@@ -1164,7 +1166,7 @@ data MenuEntry
 
 menuItems :: Widget -> PopupMenu -> UI a -> UI a
 menuItems w popup body = do
-  st <- state w "menu" (MenuState <$> newIORef [] <*> newIORef [] <*> newIORef [])
+  st <- widgetState w "menu" (MenuState <$> newIORef [] <*> newIORef [] <*> newIORef [])
   chosen <- events w "index_pressed" $ \args -> case args of
     index : _ -> fromIntegral <$> (fromVariant index :: IO Int64)
     [] -> pure (-1)
@@ -1183,7 +1185,7 @@ menuItems w popup body = do
 menuEntry :: MenuEntry -> UI Bool
 menuEntry entry = do
   parent <- UI (pure . scopeWidget . envScope)
-  st <- state parent "menu" (fail "Godot.ImUI: menu items can only be created in a menu" :: IO MenuState)
+  st <- widgetState parent "menu" (fail "Godot.ImUI: menu items can only be created in a menu" :: IO MenuState)
   liftIO $ do
     entries <- readIORef (menuEntries st)
     writeIORef (menuEntries st) (entry : entries)
@@ -1278,7 +1280,7 @@ subwindow kind modal DialogOpts {..} title body = keyedNode key $ do
     Window.setExclusive win modal
     pure win
   prop w "title" title (\s -> toGString s >>= Window.setTitle win)
-  content <- state w "content" (contentRoot (upcast win))
+  content <- widgetState w "content" (contentRoot (upcast win))
   a <- children False content body
   -- Shown once it has its content, so that it is centred at its real size,
   -- and once a dialog that is no longer created is gone: only one can

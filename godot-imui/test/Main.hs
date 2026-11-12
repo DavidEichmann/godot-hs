@@ -15,6 +15,7 @@ import Control.Monad (forM, forM_, unless, when)
 import Data.IORef
 import Data.Int (Int64)
 import qualified Data.Tree as T
+import Data.Typeable (Typeable)
 import Godot.Api
 import qualified Godot.Api.Class.BaseButton as BaseButton
 import qualified Godot.Api.Class.Button as Button
@@ -94,8 +95,12 @@ main = do
   cwdBefore <- getCurrentDirectory
   cwdInside <- newIORef ""
 
-  runUIWith ["--headless"] defaultWindow {windowTitle = "godot-imui \"test\""} initial $ \s -> do
+  runUIWith ["--headless"] defaultWindow {windowTitle = "godot-imui \"test\""} $ withState initial $ \s -> do
     let f = frame s
+    -- State in the UI monad: counts the frames.
+    (frames, setFrames) <- state (0 :: Int)
+    liftIO (setFrames (frames + 1))
+    when (f == 3) (check ("state: kept from frame to frame: " ++ show frames) (frames == 3))
     when (f == 2) (liftIO (writeIORef cwdInside =<< getCurrentDirectory))
     -- An image file for 'image' to load.
     when (f == 0) $ liftIO $ do
@@ -253,7 +258,7 @@ main = do
   check' failures "the working directory is unchanged while the UI runs" (inside == cwdBefore)
 
   -- Godot cannot be started twice: that must be an error, not a crash.
-  second <- try (runUIWith ["--headless"] defaultWindow () pure)
+  second <- try (runUIWith ["--headless"] defaultWindow (pure ()))
   check' failures "runUI refuses to run a second time" $ case second of
     Left (_ :: IOException) -> True
     Right () -> False
@@ -262,6 +267,13 @@ main = do
   unless done (putStrLn "FAIL the UI stopped before the last frame")
   n <- readIORef failures
   when (n > 0 || not done) exitFailure
+
+-- | Keep the test's state in a 'state', passing it through each frame.
+withState :: (Typeable s) => s -> (s -> UI s) -> UI ()
+withState initial ui = do
+  (s, set) <- state initial
+  s' <- ui s
+  liftIO (set s')
 
 -- | Menus, trees, images, dialogs, ...: the content of top-level widget 13.
 extras :: (String -> Bool -> UI ()) -> FilePath -> Int -> Extra -> UI Extra
@@ -293,6 +305,13 @@ extras check png f x = do
   -- 13: one of the dialogs, when open
   dialogResult <- if dialogOpen x then Just <$> dialog "Dialog" (button "OK") else pure Nothing
   fileResult <- if fileOpen x then openFileDialog "Open" ["*.txt"] else pure Choosing
+  -- After the dialogs: a container with a state, not created in frame 3.
+  when (f `elem` [1, 2, 4]) $ vbox $ do
+    (n, setN) <- state (0 :: Int)
+    (s, setS) <- state "a"
+    liftIO (setN (n + 1) >> setS (s ++ "a"))
+    when (f == 2) (check ("state: kept in its container: " ++ show (n, s)) (n == 1 && s == "aa"))
+    when (f == 4) (check ("state: starts again when its container is created again: " ++ show (n, s)) (n == 0 && s == "a"))
 
   e <- liftIO (rootBox >>= \box -> child @VBoxContainer box 13)
   file <- liftIO (child @MenuBar e 0 >>= \bar -> child @PopupMenu bar 0)
