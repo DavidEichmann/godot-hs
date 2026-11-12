@@ -9,23 +9,23 @@ import Godot.ImUI
 import Paths_godot_imui (getDataFileName)
 
 data State = State
-  { tab :: Int
-  , clicks :: Int
-  , name :: String
-  , volume :: Double
-  , copies :: Int
-  , size :: Int
-  , subscribe :: Bool
-  , todos :: [Todo]
-  , newTodo :: String
-  , nextId :: Int
-  , selected :: Maybe [Int]
-  -- ^ the path to the selected item of the tree
-  , picture :: FilePath
-  , choosingPicture :: Bool
-  , notes :: String
-  , showFooter :: Bool
-  , aboutOpen :: Bool
+  { tab :: Int,
+    clicks :: Int,
+    name :: String,
+    volume :: Double,
+    copies :: Int,
+    size :: Int,
+    subscribe :: Bool,
+    todos :: [Todo],
+    newTodo :: String,
+    nextId :: Int,
+    -- | the path to the selected item of the tree
+    selected :: Maybe [Int],
+    picture :: FilePath,
+    choosingPicture :: Bool,
+    notes :: String,
+    showFooter :: Bool,
+    aboutOpen :: Bool
   }
 
 data Todo = Todo {todoId :: Int, todoDone :: Bool, todoText :: String}
@@ -33,27 +33,27 @@ data Todo = Todo {todoId :: Int, todoDone :: Bool, todoText :: String}
 main :: IO ()
 main = do
   logo <- getDataFileName "example/lambda.png"
-  runUI defaultWindow {windowTitle = "godot-imui example", windowSize = (560, 560)} (initial logo) ui
-  where
-    initial logo =
-      State
-        { tab = 0
-        , clicks = 0
-        , name = ""
-        , volume = 40
-        , copies = 1
-        , size = 1
-        , subscribe = False
-        , todos = [Todo 0 True "Write a UI library", Todo 1 False "Write a UI with it"]
-        , newTodo = ""
-        , nextId = 2
-        , selected = Just [0, 1]
-        , picture = logo
-        , choosingPicture = False
-        , notes = "Edit me.\n"
-        , showFooter = True
-        , aboutOpen = False
-        }
+  runUI
+    defaultWindow {windowTitle = "godot-imui example", windowSize = (560, 560)}
+    State
+      { tab = 0,
+        clicks = 0,
+        name = "",
+        volume = 40,
+        copies = 1,
+        size = 1,
+        subscribe = False,
+        todos = [Todo 0 True "Write a UI library", Todo 1 False "Write a UI with it"],
+        newTodo = "",
+        nextId = 2,
+        selected = Just [0, 1],
+        picture = logo,
+        choosingPicture = False,
+        notes = "Edit me.\n",
+        showFooter = True,
+        aboutOpen = False
+      }
+    ui
 
 -- | The whole UI. Runs every frame with the current state, and returns the
 -- state for the next frame.
@@ -99,10 +99,10 @@ menus s = menuBar $ do
   about <- menu "Help" (menuItem "About")
   pure
     s
-      { choosingPicture = choosingPicture s || choose
-      , showFooter = footer'
-      , tab = tab'
-      , aboutOpen = aboutOpen s || about
+      { choosingPicture = choosingPicture s || choose,
+        showFooter = footer',
+        tab = tab',
+        aboutOpen = aboutOpen s || about
       }
 
 -- | Dialogs are open for as long as they are created.
@@ -195,9 +195,9 @@ browseTab s = do
 
 library :: Forest String
 library =
-  [ Node "Languages" [Node "Haskell" [], Node "GDScript" [], Node "C++" []]
-  , Node "Engines" [Node "Godot" [Node "2D" [], Node "3D" [], Node "UI" []]]
-  , Node "Libraries" [Node "godot-sys" [], Node "godot-low" [], Node "godot-imui" []]
+  [ Node "Languages" [Node "Haskell" [], Node "GDScript" [], Node "C++" []],
+    Node "Engines" [Node "Godot" [Node "2D" [], Node "3D" [], Node "UI" []]],
+    Node "Libraries" [Node "godot-sys" [], Node "godot-low" [], Node "godot-imui" []]
   ]
 
 -- | The label of the item at a path.
