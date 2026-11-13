@@ -171,8 +171,6 @@ data Outcome
   | Error String
   | -- | setting the version needs it installed first
     NotInstalledYet Target
-  | -- | GHCup was upgraded (so offer to restart)
-    Upgraded String
 
 -- | A version, with its tool.
 data Target = Target {tTool :: Tool, tDesc :: Maybe ToolDescription, tVersion :: ListResult}
@@ -231,7 +229,6 @@ app logBuf restart = do
   (legend, setLegend) <- state False
   (form, setForm) <- state (Nothing :: Maybe OpenForm)
   (startedAt, setStartedAt) <- state (0 :: Double)
-  (offerRestart, setOfferRestart) <- state (Nothing :: Maybe String)
   installFields <- state noFields
   ghcFields <- state noFields
   hlsFields <- state noFields
@@ -268,7 +265,6 @@ app logBuf restart = do
         Succeeded s -> setStatus s
         Error e -> setStatus ("Failed: " ++ firstLine e) >> setFailure (Just e)
         NotInstalledYet t -> setStatus "" >> setPending (Just t)
-        Upgraded s -> setStatus s >> setOfferRestart (Just s)
     Failed e _ | nextJob - 1 > seen -> liftIO $ do
       setSeen (nextJob - 1)
       setStatus "Failed"
@@ -339,11 +335,6 @@ app logBuf restart = do
     pure ()
 
   -- Dialogs.
-  forM_ offerRestart $ \done -> do
-    answer <- confirm "Restart" (done ++ ".\nRestart ghcup-gui, to start again with the new GHCup's settings and metadata?")
-    forM_ answer $ \yes -> do
-      liftIO (setOfferRestart Nothing)
-      when yes (liftIO restart >> quit)
   forM_ failure $ \e -> do
     ok <- messageBox "Error" e
     when ok (liftIO (setFailure Nothing))
@@ -444,10 +435,7 @@ mainView m selected setSelected showAll busy start setDetails setForm = do
         if tool == Tool "ghcup"
           then unless lInstalled $ do
             up <- act "Upgrade" "Upgrade GHCup to this version"
-            when up $
-              start
-                ("Upgrading GHCup to " ++ versionText lr)
-                (either Error (const (Upgraded ("Upgraded GHCup to " ++ versionText lr))) <$> installVersion defaultInstallOptions tool td lr)
+            when up (start ("Upgrading GHCup to " ++ versionText lr) (outcome ("Upgraded GHCup to " ++ versionText lr) (installVersion defaultInstallOptions tool td lr)))
           else do
             unless lInstalled $ do
               i <-

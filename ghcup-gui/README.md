@@ -48,11 +48,8 @@ has arrived (the size comes from the server, as GHCup's metadata has none);
 otherwise an animation, with what GHCup is doing (verifying, unpacking,
 installing, building, ...). After each action the list is reloaded.
 
-After upgrading GHCup, ghcup-gui offers to restart (as `ghcup tui` does);
-**File** ▸ **Restart** restarts it at any time. Restarting loads GHCup's
-settings, metadata and installed tools again. (ghcup-gui's own GHCup code is
-the ghcup library it was built with, which only changes when ghcup-gui is
-rebuilt against the new version.)
+**File** ▸ **Restart** restarts ghcup-gui, loading GHCup's settings,
+metadata and installed tools again.
 
 Differences from the TUI:
 
@@ -60,6 +57,10 @@ Differences from the TUI:
   are not supported: it shows what `ghcup tui` shows by default.
 - curl's own progress output goes to the terminal ghcup-gui was started
   from; the window shows its own (see above).
+- After upgrading GHCup, the TUI restarts itself to run the new version.
+  ghcup-gui does not offer that: its GHCup code is the ghcup library it was
+  built with, which only changes when ghcup-gui is rebuilt against the new
+  version.
 - Custom key bindings in `config.yaml` do not apply.
 
 ## How it works
