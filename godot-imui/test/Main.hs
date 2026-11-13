@@ -42,6 +42,7 @@ import qualified Godot.Api.Class.LineEdit as LineEdit
 import qualified Godot.Api.Class.Node as Node
 import qualified Godot.Api.Class.Object as Object
 import qualified Godot.Api.Class.OptionButton as OptionButton
+import qualified Godot.Api.Class.ProgressBar as ProgressBar
 import qualified Godot.Api.Class.Range as Range
 import qualified Godot.Api.Class.SceneTree as SceneTree
 import qualified Godot.Api.Class.TabBar as TabBar
@@ -135,7 +136,7 @@ main = do
     size' <- dropdown ["Small", "Medium", "Large"] (size s) -- 6
     tab' <- tabBar ["One", "Two"] (tab s) -- 7
     notes' <- textArea (notes s) -- 8
-    progressBar (volume s / 10) -- 9
+    progressBarWith progressBarOpts {indeterminate = f == 2} (volume s / 10) -- 9
     separator -- 10
     -- 11: a row whose content changes from frame to frame
     hbox $ do
@@ -180,6 +181,8 @@ main = do
         TextEdit.setText te =<< toGString "line 1\nline 2"
         writeIORef itemIds =<< forM [0 .. 2] (\i -> child @LineEdit box (base + i) >>= Object.getInstanceId)
       2 -> do
+        spinning <- liftIO (child @ProgressBar box 9 >>= ProgressBar.isIndeterminate)
+        check "progressBar: indeterminate" spinning
         check "button: clicked after its signal" clicked
         check "textInput: returns the typed text" (name' == "typed")
         check "checkbox: returns the new state" checked'
@@ -191,6 +194,8 @@ main = do
         shown <- liftIO (child @Button box 1 >>= Button.getText >>= fromGString)
         check ("button: text follows the state: " ++ shown) (shown == "Count: 0")
       3 -> do
+        spinning <- liftIO (child @ProgressBar box 9 >>= ProgressBar.isIndeterminate)
+        check "progressBar: no longer indeterminate" (not spinning)
         check "button: clicked only once" (not clicked)
         shown <- liftIO (child @Button box 1 >>= Button.getText >>= fromGString)
         check ("button: text follows the state: " ++ shown) (shown == "Count: 1")

@@ -17,8 +17,11 @@ module GHCup.GUI.App
   )
 where
 
-import Control.Monad (forM_, unless, when)
+import Control.Concurrent (forkIO)
+import Control.Exception (IOException, try)
+import Control.Monad (forM_, join, unless, void, when)
 import Control.Monad.Reader (runReaderT)
+import Data.Char (toLower)
 import Data.IORef
 import Data.List (findIndex, intercalate, sort)
 import qualified Data.Map.Strict as Map
@@ -33,9 +36,13 @@ import GHCup.GUI.Forms
 import GHCup.GUI.Setup
 import GHCup.Prelude (decUTF8Safe)
 import GHCup.Prelude.Logger (logError)
+import GHCup.Query.Metadata (getDownloadInfo)
 import GHCup.Types
   ( AppState (..),
+    DownloadInfo (..),
     Tag (..),
+    TargetVersion (..),
+    TargetVersionReq (..),
     Tool (..),
     ToolDescription (..),
     ghc,
@@ -44,20 +51,78 @@ import GHCup.Types
     tagToString,
   )
 import Godot.ImUI
+import GHC.Clock (getMonotonicTime)
+import System.Directory (getFileSize)
+import System.Exit (ExitCode (..))
+import System.FilePath (takeFileName, (<.>))
+import System.Process (readProcessWithExitCode)
 import URI.ByteString (serializeURIRef')
 
 --------------------------------------------------------------------------------
 -- ghcup's log
 
--- | What ghcup logged, last lines first (at most 'logLines').
-newtype LogBuffer = LogBuffer (IORef (Seq.Seq Text))
+-- | What ghcup logged, last lines first (at most 'logLines'), what it is
+-- doing, and the sizes of what it downloaded.
+data LogBuffer = LogBuffer (IORef (Seq.Seq Text)) (IORef Step) (IORef (Map.Map String (Maybe Integer)))
+
+-- | What ghcup is doing, from its last log line.
+data Step = Step
+  { -- | the line
+    stepText :: String,
+    -- | what it is downloading, and the file it downloads to, if it is
+    -- downloading
+    stepDownload :: Maybe (String, FilePath)
+  }
 
 newLogBuffer :: IO LogBuffer
-newLogBuffer = LogBuffer <$> newIORef Seq.empty
+newLogBuffer = LogBuffer <$> newIORef Seq.empty <*> newIORef (Step "" Nothing) <*> newIORef Map.empty
 
 -- | ghcup's console output. (Called from the jobs' threads.)
 appendLog :: LogBuffer -> Text -> IO ()
-appendLog (LogBuffer ref) t = atomicModifyIORef' ref (\s -> (Seq.take logLines (stripANSI t Seq.<| s), ()))
+appendLog (LogBuffer ref step sizes) t = do
+  let t' = stripANSI t
+  atomicModifyIORef' ref (\s -> (Seq.take logLines (t' Seq.<| s), ()))
+  forM_ (listToMaybe (reverse (filter (not . T.null . T.strip) (T.lines t')))) $ \line -> do
+    -- "[ Info  ] downloading: <url> as file <path>"
+    let message = T.strip (T.drop 1 (T.dropWhile (/= ']') line))
+        download = case T.breakOn " as file " message of
+          (before, path)
+            | Just url <- T.stripPrefix "downloading: " before,
+              not (T.null path) ->
+                Just (T.unpack url, T.unpack (T.drop 9 path))
+          _ -> Nothing
+    atomicWriteIORef step (Step (T.unpack message) download)
+    -- Ask the server for the size, to show how far the download got.
+    forM_ download $ \(url, _) -> do
+      new <- atomicModifyIORef' sizes (\m -> if Map.member url m then (m, False) else (Map.insert url Nothing m, True))
+      when new $ void $ forkIO $ do
+        size <- contentLength url
+        atomicModifyIORef' sizes (\m -> (Map.insert url size m, ()))
+
+-- | The size of a download, from an HTTP HEAD request (with curl, which ghcup
+-- downloads with by default).
+contentLength :: String -> IO (Maybe Integer)
+contentLength url = do
+  r <- try (readProcessWithExitCode "curl" ["-sIL", "--max-time", "20", url] "")
+  pure $ case r of
+    Right (ExitSuccess, out, _) ->
+      -- After redirects, the last response's length.
+      listToMaybe . reverse $
+        [ n
+        | l <- lines out,
+          let (name, value) = break (== ':') l,
+          map toLower name == "content-length",
+          [(n, _)] <- [reads (drop 1 value)]
+        ]
+    Right _ -> Nothing
+    Left (_ :: IOException) -> Nothing
+
+-- | The size of a download, if known.
+downloadSize :: LogBuffer -> String -> IO (Maybe Integer)
+downloadSize (LogBuffer _ _ sizes) url = join . Map.lookup url <$> readIORef sizes
+
+currentStep :: LogBuffer -> IO Step
+currentStep (LogBuffer _ step _) = readIORef step
 
 -- | Without terminal escape sequences (ghcup's log levels are coloured).
 stripANSI :: Text -> Text
@@ -71,13 +136,32 @@ logLines = 400
 
 -- | The log, newest lines first (so that the latest is in view).
 logText :: LogBuffer -> IO String
-logText (LogBuffer ref) = T.unpack . T.concat . map (`T.snoc` '\n') . concatMap (reverse . T.lines) . foldr (:) [] <$> readIORef ref
+logText (LogBuffer ref _ _) = T.unpack . T.concat . map (`T.snoc` '\n') . concatMap (reverse . T.lines) . foldr (:) [] <$> readIORef ref
 
 --------------------------------------------------------------------------------
 -- Jobs
 
 -- | What is shown: ghcup's state, and every tool's versions.
-data Model = Model {mState :: AppState, mTools :: ToolListResult}
+data Model = Model
+  { mState :: AppState,
+    mTools :: ToolListResult,
+    -- | the size of each version's bindist, by its file name (to show the
+    -- progress of downloading it)
+    mSizes :: Map.Map FilePath Integer
+  }
+
+model' :: AppState -> ToolListResult -> Model
+model' st tools = Model st tools sizes
+  where
+    sizes =
+      Map.fromList
+        [ (fromMaybe (takeFileName (T.unpack _dlUri)) _dlOutput, size)
+        | (tool, (_, results)) <- Map.toList tools,
+          lr <- results,
+          let tvr = TargetVersionReq (TargetVersion (lCross lr) (lVer lr)) (Just (fst (lRev lr))),
+          Right (_, DownloadInfo {..}) <- [getDownloadInfo tool tvr (ghcupInfo st) (pfreq st)],
+          Just size <- [_dlCSize]
+        ]
 
 -- | What a job did, for the user.
 data Outcome
@@ -87,6 +171,8 @@ data Outcome
   | Error String
   | -- | setting the version needs it installed first
     NotInstalledYet Target
+  | -- | GHCup was upgraded (so offer to restart)
+    Upgraded String
 
 -- | A version, with its tool.
 data Target = Target {tTool :: Tool, tDesc :: Maybe ToolDescription, tVersion :: ListResult}
@@ -99,7 +185,7 @@ startup :: LogBuffer -> IO (Either String Model)
 startup logBuf =
   initialAppState (appendLog logBuf) >>= \case
     Left e -> pure (Left e)
-    Right st -> fmap (Model st) <$> runReaderT loadVersions st
+    Right st -> fmap (model' st) <$> runReaderT loadVersions st
 
 -- | The list again after a change (with the download metadata fetched again,
 -- if ghcup's cache of it has expired).
@@ -107,7 +193,7 @@ reload :: Model -> IO (Either String Model)
 reload m =
   reloadMetadata (mState m) >>= \case
     Left e -> pure (Left e)
-    Right st -> fmap (Model st) <$> runReaderT loadVersions st
+    Right st -> fmap (model' st) <$> runReaderT loadVersions st
 
 -- | Run a ghcup action as job n, then reload the list (keeping the one
 -- before if that fails).
@@ -129,8 +215,9 @@ outcome done = fmap (either Error (const (Succeeded done)))
 -- | A form open for a version.
 data OpenForm = InstallForm Target | CompileGHCForm Target | CompileHLSForm Target
 
-app :: LogBuffer -> UI ()
-app logBuf = do
+-- | The window, given ghcup's log and what restarts ghcup-gui (after 'quit').
+app :: LogBuffer -> IO () -> UI ()
+app logBuf restart = do
   (job, startJob, cancelJob) <- asyncState (Just (Result 0 Quiet <$> startup logBuf))
   (nextJob, setNextJob) <- state (1 :: Int)
   (seen, setSeen) <- state (0 :: Int)
@@ -143,6 +230,8 @@ app logBuf = do
   (details, setDetails) <- state False
   (legend, setLegend) <- state False
   (form, setForm) <- state (Nothing :: Maybe OpenForm)
+  (startedAt, setStartedAt) <- state (0 :: Double)
+  (offerRestart, setOfferRestart) <- state (Nothing :: Maybe String)
   installFields <- state noFields
   ghcFields <- state noFields
   hlsFields <- state noFields
@@ -155,10 +244,12 @@ app logBuf = do
       -- Start a job (one at a time: the buttons are disabled while one runs).
       start :: String -> GHCup Outcome -> UI ()
       start title action = forM_ model $ \m -> liftIO $ do
+        setStartedAt =<< getMonotonicTime
         setRunning title
         setNextJob (nextJob + 1)
         startJob (runJob nextJob m action)
       retry = liftIO $ do
+        setStartedAt =<< getMonotonicTime
         setRunning "Loading"
         setNextJob (nextJob + 1)
         startJob (Result nextJob Quiet <$> startup logBuf)
@@ -177,6 +268,7 @@ app logBuf = do
         Succeeded s -> setStatus s
         Error e -> setStatus ("Failed: " ++ firstLine e) >> setFailure (Just e)
         NotInstalledYet t -> setStatus "" >> setPending (Just t)
+        Upgraded s -> setStatus s >> setOfferRestart (Just s)
     Failed e _ | nextJob - 1 > seen -> liftIO $ do
       setSeen (nextJob - 1)
       setStatus "Failed"
@@ -188,6 +280,8 @@ app logBuf = do
     menu "File" $ do
       refresh <- menuItemWith menuItemOpts {enabled = not busy && isJust model} "Refresh"
       when refresh (start "Refreshing" (pure Quiet))
+      again <- menuItemWith menuItemOpts {enabled = not busy} "Restart"
+      when again (liftIO restart >> quit)
       menuSeparator
       close <- menuItem "Quit"
       when close quit
@@ -207,23 +301,49 @@ app logBuf = do
 
   -- The status bar and ghcup's log.
   separator
-  hbox $ do
-    if busy
-      then do
+  if busy
+    then do
+      now <- liftIO getMonotonicTime
+      step <- liftIO (currentStep logBuf)
+      downloaded <- liftIO (maybe (pure Nothing) (downloadedSize . snd) (stepDownload step))
+      -- The size of the download: from the metadata, or else the server.
+      let file = takeFileName . snd <$> stepDownload step
+      total <- case (model, file) of
+        (Just m, Just f) | Just size <- Map.lookup f (mSizes m) -> pure (Just size)
+        _ -> liftIO (maybe (pure Nothing) (downloadSize logBuf . fst) (stepDownload step))
+      hbox $ do
         label (running ++ "...")
         spacer
+        label (duration (now - startedAt))
         cancel <- buttonWith buttonOpts {tooltip = "Stop what ghcup is doing"} "Cancel"
         when cancel $ liftIO $ do
           cancelJob
           setSeen (nextJob - 1)
           setStatus (running ++ ": cancelled")
-      else label status
+      -- How far a download got, if its size is known; otherwise just that
+      -- something is going on.
+      case (downloaded, total) of
+        (Just bytes, Just size) | size > 0 -> do
+          progressBar (min 1 (fromIntegral bytes / fromIntegral size))
+          label ("Downloading " ++ fromMaybe "" file ++ ": " ++ megabytes bytes ++ " of " ++ megabytes size)
+        (Just bytes, _) -> do
+          progressBarWith progressBarOpts {indeterminate = True} 0
+          label ("Downloading " ++ fromMaybe "" file ++ ": " ++ megabytes bytes)
+        _ -> do
+          progressBarWith progressBarOpts {indeterminate = True} 0
+          label (shorten 120 (stepText step))
+    else hbox (label status)
   collapsible "Log (newest first)" $ do
     text <- liftIO (logText logBuf)
     _ <- textAreaWith textAreaOpts {minSize = (0, 130)} text
     pure ()
 
   -- Dialogs.
+  forM_ offerRestart $ \done -> do
+    answer <- confirm "Restart" (done ++ ".\nRestart ghcup-gui, to start again with the new GHCup's settings and metadata?")
+    forM_ answer $ \yes -> do
+      liftIO (setOfferRestart Nothing)
+      when yes (liftIO restart >> quit)
   forM_ failure $ \e -> do
     ok <- messageBox "Error" e
     when ok (liftIO (setFailure Nothing))
@@ -324,7 +444,10 @@ mainView m selected setSelected showAll busy start setDetails setForm = do
         if tool == Tool "ghcup"
           then unless lInstalled $ do
             up <- act "Upgrade" "Upgrade GHCup to this version"
-            when up (start ("Upgrading GHCup to " ++ versionText lr) (outcome ("Upgraded GHCup to " ++ versionText lr) (installVersion defaultInstallOptions tool td lr)))
+            when up $
+              start
+                ("Upgrading GHCup to " ++ versionText lr)
+                (either Error (const (Upgraded ("Upgraded GHCup to " ++ versionText lr))) <$> installVersion defaultInstallOptions tool td lr)
           else do
             unless lInstalled $ do
               i <-
@@ -505,3 +628,24 @@ escape = concatMap (\c -> if c == '[' then "[lb]" else [c])
 
 firstLine :: String -> String
 firstLine = takeWhile (/= '\n')
+
+shorten :: Int -> String -> String
+shorten n s = if length s > n then take (n - 3) s ++ "..." else s
+
+-- | How much of a download curl has written: to the file with @.tmp@, which
+-- it renames when done.
+downloadedSize :: FilePath -> IO (Maybe Integer)
+downloadedSize path = do
+  r <- try (getFileSize (path <.> "tmp"))
+  case r of
+    Right n -> pure (Just n)
+    Left (_ :: IOException) -> either (\(_ :: IOException) -> Nothing) Just <$> try (getFileSize path)
+
+megabytes :: Integer -> String
+megabytes b = let tenths = (b * 10 + 524288) `div` 1048576 in show (tenths `div` 10) ++ "." ++ show (tenths `mod` 10) ++ " MB"
+
+-- | Seconds as 1:05 or 12s.
+duration :: Double -> String
+duration secs =
+  let s = floor secs :: Int
+   in if s < 60 then show s ++ "s" else show (s `div` 60) ++ ":" ++ (if s `mod` 60 < 10 then "0" else "") ++ show (s `mod` 60)

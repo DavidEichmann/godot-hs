@@ -35,23 +35,31 @@ tags (recommended, latest, base-…) and notes (hls-powered, release day, …).
 | Enter on a tool: its details | **Details** |
 | `a`: show all versions | **View** ▸ **Show all versions** |
 | `h`: help | **Help** ▸ **Legend** |
-| the terminal output of an action | the status bar and the **Log** panel |
+| the terminal output of an action | the status bar (with a progress bar) and the **Log** panel |
 
 The option forms have the TUI's fields and checks (each field is checked
 with ghcup's own parsers, and the form's OK button is enabled once it is
 valid), and remember what was entered, so that a typo can be fixed.
 
 Only one action runs at a time, in the background, so the window keeps
-responding; **Cancel** stops it. After each one the list is reloaded.
+responding; **Cancel** stops it. While it runs, the status bar shows how
+long it has been going, and a progress bar: for a download, how much of it
+has arrived (the size comes from the server, as GHCup's metadata has none);
+otherwise an animation, with what GHCup is doing (verifying, unpacking,
+installing, building, ...). After each action the list is reloaded.
+
+After upgrading GHCup, ghcup-gui offers to restart (as `ghcup tui` does);
+**File** ▸ **Restart** restarts it at any time. Restarting loads GHCup's
+settings, metadata and installed tools again. (ghcup-gui's own GHCup code is
+the ghcup library it was built with, which only changes when ghcup-gui is
+rebuilt against the new version.)
 
 Differences from the TUI:
 
 - Its command line options (`--tool`, `--show-criteria`, `--since`, ...)
   are not supported: it shows what `ghcup tui` shows by default.
-- Download progress (curl's) goes to the terminal ghcup-gui was started
-  from, not to the window; the log shows what is being downloaded.
-- After upgrading GHCup, the `ghcup` command is the new version, but
-  ghcup-gui itself is not restarted (it is a separate program).
+- curl's own progress output goes to the terminal ghcup-gui was started
+  from; the window shows its own (see above).
 - Custom key bindings in `config.yaml` do not apply.
 
 ## How it works

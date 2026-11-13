@@ -1433,12 +1433,16 @@ data ProgressBarOpts = ProgressBarOpts
   , expand :: Bool
   , minSize :: (Int, Int)
   , key :: String
+  , indeterminate :: Bool
+  -- ^ show that something is going on, with an animation, instead of how
+  -- far it got (the fraction is then ignored)
   }
 
 progressBarOpts :: ProgressBarOpts
-progressBarOpts = ProgressBarOpts {tooltip = "", expand = False, minSize = (0, 0), key = ""}
+progressBarOpts = ProgressBarOpts {tooltip = "", expand = False, minSize = (0, 0), key = "", indeterminate = False}
 
--- | A progress bar, for a fraction from 0 to 1.
+-- | A progress bar, for a fraction from 0 to 1. (With the @indeterminate@
+-- option, an animation for work whose progress is not known.)
 progressBar :: Double -> UI ()
 progressBar = progressBarWith progressBarOpts
 
@@ -1450,6 +1454,7 @@ progressBarWith ProgressBarOpts {..} fraction = layout tooltip expand minSize ke
     Range.setStep p 0
     pure p
   prop w "value" fraction (Range.setValue p)
+  prop w "indeterminate" indeterminate (ProgressBar.setIndeterminate p)
 
 -- | The options of 'separatorWith'.
 data SeparatorOpts = SeparatorOpts

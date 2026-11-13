@@ -140,7 +140,7 @@ For other things to clean up when their part of the UI goes away,
 | `tree :: Forest String -> Maybe [Int] -> UI (Maybe [Int])` | collapsible tree (`Data.Tree`); the selection is the path of indices to the item |
 | `colorPicker :: Color -> UI Color` | a button that opens a colour picker |
 | `tabBar :: [String] -> Int -> UI Int` | tabs; show the current tab's content yourself |
-| `progressBar :: Double -> UI ()` | a fraction from 0 to 1 |
+| `progressBar :: Double -> UI ()` | a fraction from 0 to 1 (or, with the `indeterminate` option, an animation for work whose progress is not known) |
 | `separator`, `spacer` | a dividing line; empty space that pushes widgets apart |
 
 ### Menus
