@@ -10,8 +10,11 @@
 -- return in the next frame.
 module Main (main) where
 
-import Control.Exception (IOException, try)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Concurrent (MVar, newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay)
+import Control.Exception (IOException, onException, throwIO, try)
+import Control.Monad (forM, forM_, forever, unless, when)
+import Data.List (isInfixOf)
+import Data.Maybe (isJust)
 import Data.IORef
 import Data.Int (Int64)
 import qualified Data.Tree as T
@@ -48,6 +51,7 @@ import Godot.ImUI.Internal (release, runUIWith)
 import System.Directory (getCurrentDirectory, getTemporaryDirectory, removeFile)
 import System.FilePath ((</>))
 import System.Exit (exitFailure)
+import System.Timeout (timeout)
 
 data State = State
   { frame :: Int
@@ -81,6 +85,7 @@ main :: IO ()
 main = do
   failures <- newIORef (0 :: Int)
   finished <- newIORef False
+  gates <- Gates <$> newEmptyMVar <*> newEmptyMVar <*> newEmptyMVar <*> newEmptyMVar <*> newEmptyMVar
   let check :: String -> Bool -> UI ()
       check what ok = liftIO $ do
         putStrLn ((if ok then "ok   " else "FAIL ") ++ what)
@@ -147,7 +152,7 @@ main = do
       center (paragraph "C")
       padding 4 (label "D")
     -- 13: the rest of the widgets
-    extra' <- vbox (extras check png f (extra s))
+    extra' <- vbox (extras check png gates f (extra s))
     -- 14..: keyed items, reordered in frame 6
     forM_ (items s) $ \item -> textInputWith textInputOpts {key = item} item
 
@@ -276,8 +281,8 @@ withState initial ui = do
   liftIO (set s')
 
 -- | Menus, trees, images, dialogs, ...: the content of top-level widget 13.
-extras :: (String -> Bool -> UI ()) -> FilePath -> Int -> Extra -> UI Extra
-extras check png f x = do
+extras :: (String -> Bool -> UI ()) -> FilePath -> Gates -> Int -> Extra -> UI Extra
+extras check png gates f x = do
   (open, wrap', recent) <- menuBar $ do
     -- 0
     chosen <- menu "File" $ do
@@ -425,6 +430,9 @@ extras check png f x = do
       check ("dialog: is gone when no longer created: " ++ show n) (n == 14)
     _ -> pure ()
 
+  -- Last, so that the other widgets' positions do not change.
+  asyncTest check gates f
+
   let x' = x {wrap = wrap', treeSel = treeSel', listSel = listSel', radio = radio', switch = switch', colour = colour'}
   pure $ case f of
     3 -> x' {forest = [T.Node "Fruit" [T.Node "Apple" [], T.Node "Plum" []], T.Node "Veg" [T.Node "Leek" []], T.Node "Bread" [], T.Node "Milk" []]}
@@ -432,6 +440,51 @@ extras check png f x = do
     6 -> x' {dialogOpen = False, fileOpen = True}
     8 -> x' {fileOpen = False}
     _ -> x'
+
+-- | What the work in 'asyncTest' waits for, and tells.
+data Gates = Gates
+  { gate1, gate2, gate3 :: MVar Int,
+    -- | that the work was cancelled
+    cancelled2, cancelled4 :: MVar ()
+  }
+
+-- | 'asyncState', in a container created in frames 0 to 6. (Keyed, so that
+-- it is not mistaken for the container before it, which comes and goes.)
+asyncTest :: (String -> Bool -> UI ()) -> Gates -> Int -> UI ()
+asyncTest check g f = do
+  when (f <= 6) $ vboxWith vboxOpts {key = "async"} $ do
+    (st, start, stop) <- asyncState (Just (takeMVar (gate1 g)))
+    let is what ok = check ("asyncState: " ++ what ++ ": " ++ show st) ok
+        -- Time for work that can finish to finish, before the next frame.
+        settle = threadDelay 100000
+    case f of
+      0 -> is "runs the initial work" (case st of Running Nothing -> True; _ -> False)
+      1 -> do
+        is "still running" (case st of Running Nothing -> True; _ -> False)
+        liftIO (putMVar (gate1 g) 1 >> settle)
+      2 -> do
+        is "done" (case st of Done 1 -> True; _ -> False)
+        liftIO (start (throwIO (userError "boom")) >> settle)
+      3 -> do
+        is "failed, keeping the value before" (case st of Failed e (Just 1) -> "boom" `isInfixOf` show e; _ -> False)
+        liftIO (start (takeMVar (gate2 g) `onException` putMVar (cancelled2 g) ()))
+      4 -> do
+        is "running again, with the last value" (case st of Running (Just 1) -> True; _ -> False)
+        -- Interrupts the work running.
+        liftIO (start (pure 3) >> settle)
+      5 -> do
+        is "the new work's result" (case st of Done 3 -> True; _ -> False)
+        interrupted <- liftIO (timeout 1000000 (readMVar (cancelled2 g)))
+        check "asyncState: starting work cancels the work running" (isJust interrupted)
+        liftIO (start (takeMVar (gate3 g)) >> stop)
+      6 -> do
+        is "cancelling keeps the last result" (case st of Done 3 -> True; _ -> False)
+        liftIO (start (forever (threadDelay 1000000) `onException` putMVar (cancelled4 g) ()))
+      _ -> pure ()
+  -- The container is gone from frame 7: its work is cancelled.
+  when (f == 8) $ do
+    cancelled <- liftIO (timeout 1000000 (readMVar (cancelled4 g)))
+    check "asyncState: the work is cancelled when its container is gone" (isJust cancelled)
 
 -- | Emit a signal of an object, with the given arguments.
 emit :: Inherits o Object => o -> String -> [Variant] -> IO ()

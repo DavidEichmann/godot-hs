@@ -34,6 +34,10 @@ module Godot.ImUI.Internal
     getAttrs,
     afterFrame,
     state,
+    stateRef,
+    asyncState,
+    AsyncState (..),
+    latestValue,
 
     -- * Widgets
     Widget (..),
@@ -62,11 +66,15 @@ module Godot.ImUI.Internal
   )
 where
 
-import Control.Monad (unless, when)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.Async (Async, async, cancel, poll)
+import Control.Exception (SomeException, finally)
+import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (MonadIO (..))
 import Data.Dynamic (Dynamic, Typeable, fromDynamic, toDyn)
 import Data.IORef
 import Data.Int (Int64)
+import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import Godot.Api hiding (Theme)
 import Godot.Api.Embed (Project (..), defaultProject, withGodot)
@@ -180,21 +188,112 @@ getAttrs = UI (pure . envAttrs)
 --   again from the initial value if it is created again. Use a container's
 --   @key@ to keep the state of an item of a list with its item.
 state :: (Typeable a) => a -> UI (a, a -> IO ())
-state initial = UI $ \env -> do
+state initial = do
+  (ref, _) <- stateRef initial (\_ -> pure ())
+  current <- liftIO (readIORef ref)
+  pure (current, writeIORef ref)
+
+-- | The state behind 'state', for building other kinds of state: takes the
+-- initial value and what to do with the value when the state is dropped
+-- (its container is no longer created, or no longer creates the state), and
+-- returns the state's 'IORef' and whether it was created this frame. The
+-- cleanup action is the one given when the state was created.
+stateRef :: (Typeable a) => a -> (a -> IO ()) -> UI (IORef a, Bool)
+stateRef initial cleanup = UI $ \env -> do
   let sc = envScope env
       w = scopeWidget sc
   i <- readIORef (scopeStates sc)
   writeIORef (scopeStates sc) (i + 1)
   props <- readIORef (wProps w)
-  ref <- case Map.lookup (stateName i) props >>= fromDynamic of
-    Just ref -> pure ref
+  case Map.lookup (stateName i) props >>= fromDynamic of
+    Just ref -> pure (ref, False)
     -- New, or of another type (the block changed): start again.
     Nothing -> do
+      dropState w i
       ref <- newIORef initial
-      modifyIORef' (wProps w) (Map.insert (stateName i) (toDyn ref))
-      pure ref
-  current <- readIORef ref
-  pure (current, writeIORef ref)
+      modifyIORef'
+        (wProps w)
+        (Map.insert (stateName i) (toDyn ref) . Map.insert (cleanupName i) (toDyn (readIORef ref >>= cleanup)))
+      pure (ref, True)
+
+-- | Where some work running in the background is: see 'asyncState'.
+data AsyncState a
+  = -- | No work has finished (or none was started).
+    None
+  | -- | Work is running; the value of the last work that finished.
+    Running {oldValue :: Maybe a}
+  | -- | The last work that finished returned this.
+    Done a
+  | -- | The last work that finished threw this; the value of the work
+    -- before.
+    Failed SomeException (Maybe a)
+  deriving (Show)
+
+-- | The value of the last work that finished successfully, if any.
+latestValue :: AsyncState a -> Maybe a
+latestValue s = case s of
+  None -> Nothing
+  Running old -> old
+  Done a -> Just a
+  Failed _ old -> old
+
+-- | Work that runs in the background, in its own thread, so that the UI
+-- keeps going: like 'state', but for the result of an 'IO' action. Takes the
+-- work to start when the state is created, and returns where the work is,
+-- an action that starts other work (cancelling the work running, if any),
+-- and an action that cancels the work running (keeping the last result).
+--
+-- @
+-- (answer, start, cancel) <- asyncState Nothing
+-- go <- 'Godot.ImUI.button' \"Ask\"
+-- when go (liftIO (start (fetchAnswer question)))
+-- 'Godot.ImUI.label' $ case answer of
+--   'Running' _ -> \"Asking...\"
+--   'Done' a -> a
+--   'Failed' e _ -> \"Failed: \" ++ show e
+--   'None' -> \"\"
+-- @
+--
+-- The UI shows the result from the frame after the work finishes. The work
+-- is cancelled (with an asynchronous exception) when the state is dropped,
+-- like 'state' is: when its container is no longer created. The work must
+-- not use Godot or the UI, which only work on the UI's thread; it returns
+-- its result for the UI to show. Start and cancel work from the UI (e.g. in
+-- 'liftIO' when a button is clicked). Link with @-threaded@, so that the work
+-- runs alongside the UI.
+asyncState :: (Typeable a) => Maybe (IO a) -> UI (AsyncState a, IO a -> IO (), IO ())
+asyncState initial = do
+  (ref, created) <- stateRef (Work Nothing None) cancelWork
+  let stop = do
+        w <- readIORef ref
+        cancelWork w
+        writeIORef ref w {workRunning = Nothing}
+      start work = do
+        stop
+        a <- async work
+        modifyIORef' ref (\w -> w {workRunning = Just a})
+  when created $ liftIO (mapM_ start initial)
+  st <- liftIO $ do
+    w <- readIORef ref
+    case workRunning w of
+      Nothing -> pure (workSettled w)
+      Just a ->
+        poll a >>= \r -> case r of
+          Nothing -> pure (Running (latestValue (workSettled w)))
+          Just result -> do
+            let finished = either (\e -> Failed e (latestValue (workSettled w))) Done result
+            writeIORef ref (Work Nothing finished)
+            pure finished
+  pure (st, start, stop)
+
+-- | What an 'asyncState' keeps: the work running, and where the last work
+-- that finished got to.
+data Work a = Work {workRunning :: Maybe (Async a), workSettled :: AsyncState a}
+
+-- | Cancel the work running, without waiting for it to stop (work in a
+-- foreign call only notices when the call returns).
+cancelWork :: Work a -> IO ()
+cancelWork w = mapM_ (void . forkIO . cancel) (workRunning w)
 
 -- | An action that runs the given one once the whole UI function has run
 -- for this frame, and the widgets it no longer creates are gone. (For
@@ -309,18 +408,39 @@ children horizontal w (UI body) = UI $ \env -> do
           envAttrs = defaultAttrs
         }
   unused <- readIORef (scopeOld sc)
+  mapM_ dispose unused
   mapM_ (\u -> Node.removeChild parent (wNode u) >> Node.queueFree (wNode u)) unused
   writeIORef (wChildren w) . reverse =<< readIORef (scopeNew sc)
   -- Drop the states the block no longer creates.
   n <- readIORef (scopeStates sc)
   props <- readIORef (wProps w)
   let before = maybe 0 id (Map.lookup "states" props >>= fromDynamic) :: Int
-  when (n /= before) $
-    writeIORef (wProps w) (foldr (Map.delete . stateName) (Map.insert "states" (toDyn n) props) [n .. before - 1])
+  when (n /= before) $ do
+    modifyIORef' (wProps w) (Map.insert "states" (toDyn n))
+    mapM_ (dropState w) [n .. before - 1]
   pure a
 
-stateName :: Int -> String
+stateName, cleanupName :: Int -> String
 stateName i = "state#" ++ show i
+cleanupName i = "cleanup#" ++ show i
+
+-- | Forget a widget's state, running its cleanup.
+dropState :: Widget -> Int -> IO ()
+dropState w i = do
+  props <- readIORef (wProps w)
+  writeIORef (wProps w) (Map.delete (stateName i) (Map.delete (cleanupName i) props))
+  sequence_ (Map.lookup (cleanupName i) props >>= fromDynamic :: Maybe (IO ()))
+
+-- | Run the cleanups of the states of a widget that is going away, and of
+-- the widgets in it: its children, and those it keeps in its 'widgetState'
+-- (a dialog's content, a menu's popup, ...).
+dispose :: Widget -> IO ()
+dispose w = do
+  props <- readIORef (wProps w)
+  writeIORef (wProps w) (Map.filterWithKey (\k _ -> not ("cleanup#" `isPrefixOf` k)) props)
+  sequence_ [c | (k, d) <- Map.toList props, "cleanup#" `isPrefixOf` k, Just c <- [fromDynamic d :: Maybe (IO ())]]
+  mapM_ dispose =<< readIORef (wChildren w)
+  mapM_ dispose [inner | d <- Map.elems props, Just inner <- [fromDynamic d]]
 
 -- | Fill a window with a themed background, a margin and a vertical box,
 -- and return the box as a widget whose 'children' are the window's content.
@@ -468,7 +588,7 @@ runUIWith extraArgs win frame = do
           sequence_ . reverse =<< atomicModifyIORef' after (\queued -> ([], queued))
           stop <- GodotInstance.iteration inst
           unless stop loop
-    loop
+    loop `finally` dispose root
 
 -- | Close the window and return from 'runUI' after this frame.
 quit :: UI ()

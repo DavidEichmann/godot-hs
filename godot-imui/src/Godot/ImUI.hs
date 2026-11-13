@@ -38,6 +38,9 @@ module Godot.ImUI
   , quit
   , liftIO
   , state
+  , asyncState
+  , AsyncState (..)
+  , latestValue
 
     -- * Options #options#
     -- $options

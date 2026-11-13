@@ -92,6 +92,36 @@ initial value if it is created again: the `counter` above starts again
 from 0 when it is hidden and shown. Key a list item's container to keep its
 state with the item.
 
+### Work in the background
+
+`asyncState` runs `IO` work in a thread of its own, so that the UI keeps
+going while it runs: a download, an install, a slow computation, ...
+
+```haskell
+(number, start, stop) <- asyncState Nothing
+go <- button "Think of a number"
+when go (liftIO (start slowNumber))
+label $ case number of
+  None -> ""
+  Running _ -> "Thinking..."
+  Done n -> "I thought of " ++ show n
+  Failed e _ -> "Failed: " ++ show e
+```
+
+- It takes the work to start when it is created (`Nothing` for none), and
+  returns where the work is, an action that starts other work, and one that
+  cancels the work running. Starting work cancels the work running, if any.
+- `Running` and `Failed` keep the value of the last work that finished
+  (`latestValue` gets it from any of them), and cancelling keeps it too.
+- The result shows from the frame after the work finishes.
+- Like a `state`, it belongs to its container: when the container is no
+  longer created, the work is cancelled.
+- The work must not use Godot or the UI, which only work on the UI's
+  thread: it returns its result for the UI to show.
+
+For other things to clean up when their part of the UI goes away,
+`Godot.ImUI.Internal.stateRef` is a state with a cleanup action.
+
 ### Widgets
 
 | Widget | Description |

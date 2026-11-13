@@ -4,7 +4,9 @@
 -- | A tour of godot-imui: cabal run godot-imui-example
 module Main (main) where
 
+import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, when)
+import GHC.Clock (getMonotonicTimeNSec)
 import Godot.ImUI
 import Paths_godot_imui (getDataFileName)
 
@@ -119,10 +121,26 @@ widgetsTab = do
   copies <- state 1
   size <- state 1
   subscribe <- state False
+  -- Work in the background: the UI keeps going while it runs. (It is
+  -- cancelled if the tab is left before it finishes.)
+  (number, think, stop) <- asyncState Nothing
   hbox $ do
     clicked <- button "Click me"
     when clicked (liftIO (setClicks (clicks + 1)))
     label ("Clicked " ++ show clicks ++ " times")
+  hbox $ do
+    let thinking = case number of
+          Running _ -> True
+          _ -> False
+    go <- buttonWith buttonOpts {enabled = not thinking} "Think of a number"
+    when go (liftIO (think slowNumber))
+    halt <- buttonWith buttonOpts {enabled = thinking} "Stop"
+    when halt (liftIO stop)
+    label $ case number of
+      None -> ""
+      Running old -> "Thinking..." ++ maybe "" (\n -> " (last time: " ++ show n ++ ")") old
+      Done n -> "I thought of " ++ show n ++ "."
+      Failed e _ -> "Failed: " ++ show e
   (name', volume', copies', size') <- panel $ grid 2 $ do
     label "Name"
     name' <- edit name (textInputWith textInputOpts {placeholder = "Your name"})
@@ -144,6 +162,13 @@ widgetsTab = do
       ++ " in "
       ++ ["small", "medium", "large"] !! size'
       ++ (if subscribe' then ", and the newsletter." else ".")
+
+-- | A number from 1 to 100, after thinking for two seconds.
+slowNumber :: IO Int
+slowNumber = do
+  threadDelay 2000000
+  t <- getMonotonicTimeNSec
+  pure (fromIntegral (t `div` 1000 `mod` 100) + 1)
 
 todoTab :: State [Todo] -> UI ()
 todoTab (todos, setTodos) = do
