@@ -272,6 +272,30 @@ link text = do
   fired w "pressed"
 ```
 
+## Smaller programs
+
+A program embeds all of Godot, about 120 MB. godot-imui only needs Godot's 2D
+UI, so godot-sys can build a Godot without the rest, which halves that. In
+your `cabal.project`:
+
+```cabal
+package godot-sys
+  flags: +release +disable-3d +disable-physics-2d +disable-navigation-2d -vulkan -sdl
+```
+
+and, to leave out the Godot modules it does not use either, build with:
+
+```sh
+export GODOT_SYS_SCONS_FLAGS="optimize=size modules_enabled_by_default=no module_freetype_enabled=yes module_text_server_adv_enabled=yes module_svg_enabled=yes module_jpg_enabled=yes module_webp_enabled=yes"
+```
+
+(GDScript, regular expressions, audio formats, networking and the image
+formats other than PNG, JPEG, SVG and WebP are then gone.) With both, the
+example is 57 MB (37 MB stripped) instead of 120 MB. godot-sys's
+`disable-advanced-gui` and `-opengl3` cannot be used: godot-imui's menus,
+trees, text areas and dialogs are Godot's advanced controls, and it renders
+with OpenGL. See [godot-sys](../godot-sys#build-options) for the options.
+
 ## Limitations
 
 - `runUI` must be called from the main thread, and only once per process

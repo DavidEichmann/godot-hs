@@ -14,6 +14,11 @@ description:
   .
   * @release@ — build the @template_release@ target instead of @template_debug@.
   .
+  * Godot's build options: a flag per option, named after it with @-@ for
+    @_@ and with the same default, e.g. @disable-3d@ for @disable_3d@ (off)
+    and @vulkan@ (on). The other options can be set through
+    @GODOT_SYS_SCONS_FLAGS@.
+  .
   Environment variables (read at build time):
   .
   * @GODOT_SYS_CACHE_DIR@ — where the Godot source and builds are kept, so
@@ -38,7 +43,9 @@ category:           Game Engine, FFI
 build-type:         Custom
 extra-doc-files:    README.md
 extra-source-files:
+  build_option_classes.json
   extension_api.json
+  scripts/update-build-option-classes.py
   scripts/update-extension-api.sh
 tested-with:        GHC == 9.12.2
 
@@ -55,6 +62,86 @@ flag shared
 flag release
   description: Build Godot's template_release target instead of template_debug.
   default:     False
+  manual:      True
+
+flag disable-3d
+  description: Remove 3D nodes, rendering and resources (Godot's disable_3d build option).
+  default:     False
+  manual:      True
+
+flag disable-advanced-gui
+  description: Remove advanced GUI controls (Tree, TextEdit, RichTextLabel, PopupMenu, dialogs, ...) (Godot's disable_advanced_gui build option).
+  default:     False
+  manual:      True
+
+flag disable-physics-2d
+  description: Remove 2D physics (Godot's disable_physics_2d build option).
+  default:     False
+  manual:      True
+
+flag disable-physics-3d
+  description: Remove 3D physics (Godot's disable_physics_3d build option).
+  default:     False
+  manual:      True
+
+flag disable-navigation-2d
+  description: Remove 2D navigation (Godot's disable_navigation_2d build option).
+  default:     False
+  manual:      True
+
+flag disable-navigation-3d
+  description: Remove 3D navigation (Godot's disable_navigation_3d build option).
+  default:     False
+  manual:      True
+
+flag disable-xr
+  description: Remove XR (VR/AR) (Godot's disable_xr build option).
+  default:     False
+  manual:      True
+
+flag vulkan
+  description: Build with the Vulkan rendering driver (Godot's vulkan build option).
+  default:     True
+  manual:      True
+
+flag opengl3
+  description: Build with the OpenGL/GLES3 rendering driver (Godot's opengl3 build option).
+  default:     True
+  manual:      True
+
+flag accesskit
+  description: Build with the AccessKit screen reader driver (Godot's accesskit build option).
+  default:     True
+  manual:      True
+
+flag sdl
+  description: Build with the SDL3 input driver (game controllers) (Godot's sdl build option).
+  default:     True
+  manual:      True
+
+flag brotli
+  description: Build with Brotli decompression and WOFF2 fonts (Godot's brotli build option).
+  default:     True
+  manual:      True
+
+flag x11
+  description: Build with X11 display (Godot's x11 build option).
+  default:     True
+  manual:      True
+
+flag wayland
+  description: Build with Wayland display (Godot's wayland build option).
+  default:     True
+  manual:      True
+
+flag pulseaudio
+  description: Build with PulseAudio (Godot's pulseaudio build option).
+  default:     True
+  manual:      True
+
+flag alsa
+  description: Build with ALSA (Godot's alsa build option).
+  default:     True
   manual:      True
 
 custom-setup

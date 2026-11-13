@@ -8,6 +8,8 @@ Builds the [Godot Engine](https://godotengine.org) as a native library
   `godotUrl`, `godotSha256` in [Setup.hs](Setup.hs)).
 - **Static or shared:** static `libgodot.a` by default; `-f +shared` builds
   `libgodot.so` and adds an rpath to it.
+- **Build options:** Godot's build options are cabal flags of the same name
+  (`disable-3d` for `disable_3d`, ...), to build a smaller Godot.
 - **Platform:** Linux (`platform=linuxbsd`).
 
 ## Requirements
@@ -30,12 +32,48 @@ cabal build all -f +release      # template_release
 cabal test all                   # create and destroy a headless Godot instance
 ```
 
+### Build options
+
+Each of these Godot build options is a flag, named after it with `-` for
+`_`, and with Godot's default. They are passed to SCons when they differ from
+the default.
+
+| Flag | Default | Effect when changed |
+| --- | --- | --- |
+| `disable-3d` | off | no 3D nodes, rendering or resources; also sets `disable-physics-3d`, `disable-navigation-3d` and `disable-xr` |
+| `disable-advanced-gui` | off | no `Tree`, `TextEdit`, `RichTextLabel`, `PopupMenu`, `MenuBar`, `SpinBox`, `OptionButton`, `ColorPicker`, split containers or dialogs |
+| `disable-physics-2d`, `disable-physics-3d` | off | no physics bodies, shapes or physics servers |
+| `disable-navigation-2d`, `disable-navigation-3d` | off | no navigation |
+| `disable-xr` | off | no XR (VR / AR) |
+| `vulkan`, `opengl3` | on | without the Vulkan or the OpenGL rendering driver |
+| `accesskit` | on | without screen reader support |
+| `sdl` | on | without SDL3 game controller input |
+| `brotli` | on | without Brotli (WOFF2 fonts) |
+| `x11`, `wayland` | on | without the X11 or the Wayland display server |
+| `pulseaudio`, `alsa` | on | without PulseAudio or ALSA audio |
+
+Set them for godot-sys in your `cabal.project`:
+
+```cabal
+package godot-sys
+  flags: +disable-3d +disable-physics-2d -vulkan
+```
+
+The other SCons options (modules, `optimize`, `lto`, ...) can be passed with
+`GODOT_SYS_SCONS_FLAGS`. Each combination is a separate Godot build (and
+cache entry). [godot-low](../godot-low) leaves out the bindings of the
+classes the `disable-*` flags remove.
+
+### What dependents get
+
 Depending on `godot-sys` gives your package:
 
 - `-lgodot` (plus `stdc++`, `m`, `pthread`, `dl`, `rt`, `atomic` when static),
 - `libgodot.h`, `core/extension/gdextension_interface.gen.h`,
   `gdextension_interface.json` and `extension_api.json` (the engine class
-  API) on the include path,
+  API) on the include path, with `scons-arguments.txt` (the arguments SCons
+  was run with, one per line) and `build_option_classes.json` (which classes
+  each `disable_*` build option removes),
 - the `Godot.Sys` module with `libgodotCreateGodotInstance` and
   `libgodotDestroyGodotInstance`.
 
@@ -72,6 +110,12 @@ Delete the directory to free its space (about 1.2 GB) or to force a rebuild;
 2. Run `scripts/update-extension-api.sh` and commit the new
    `extension_api.json`. The build refuses an `extension_api.json` whose
    version doesn't match `godotTag`.
+3. Run `scripts/update-build-option-classes.py` and commit the new
+   `build_option_classes.json` (same check). It reads Godot's source for the
+   classes each `disable_*` option removes: the `#ifndef ..._DISABLED` blocks
+   around class registrations, and modules that are not built with an option.
+4. Check that the flags in `godot-sys.cabal` and `buildOptions` in
+   `Setup.hs` still match Godot's build options.
 
 ## extension_api.json
 
@@ -93,7 +137,8 @@ tree.
 2. **build** uses the [cached](#the-build-cache) library if there is one.
    Otherwise it downloads and verifies the tarball, runs
    `scons platform=linuxbsd target=template_debug library_type=static_library ccflags=-fPIC disable_path_overrides=no`
-   (or `shared_library` / `template_release`) and saves the library and
+   (or `shared_library` / `template_release`, plus the build options whose
+   flags differ from Godot's defaults) and saves the library and
    headers in the cache. Either way it then copies them into the component
    build directory. `disable_path_overrides=no`
    keeps `--path` / `--main-pack` working so the host can point Godot at its

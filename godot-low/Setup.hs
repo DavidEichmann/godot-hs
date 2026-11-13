@@ -21,8 +21,13 @@
 --   Node3D, ...), their hierarchy, enums, constants and methods.
 -- * @Godot.Api.GlobalEnums@, @Godot.Api.Utility@: global enums and functions.
 --
+-- Classes that the build options godot-sys built Godot with remove
+-- (@disable_3d@, ...) are left out, using the SCons arguments and the table of
+-- the classes each option removes that godot-sys installs alongside.
+--
 -- The Godot.Api module list depends on the API, so configure adds it to the
--- library (exposed + autogen modules).
+-- library (exposed + autogen modules), and the later steps set it again, in
+-- case godot-sys was rebuilt with other options since.
 --
 -- Files are written into the package's autogen directory, and only when
 -- their contents change.
@@ -56,6 +61,7 @@ import Distribution.Simple.Setup
   )
 import Distribution.Simple.Utils (info, notice)
 import Distribution.Verbosity (Verbosity, normal)
+import Distribution.Pretty (prettyShow)
 import System.Directory
 import System.FilePath
 
@@ -65,22 +71,39 @@ main =
     simpleUserHooks
       { confHook = \args flags -> do
           lbi <- confHook simpleUserHooks args flags
-          addApiModules lbi
-      , buildHook = \pd lbi hooks flags -> do
-          generate (fromFlagOrDefault normal (buildVerbosity flags)) lbi
-          buildHook simpleUserHooks pd lbi hooks flags
-      , haddockHook = \pd lbi hooks flags -> do
-          generate (fromFlagOrDefault normal (haddockVerbosity flags)) lbi
-          haddockHook simpleUserHooks pd lbi hooks flags
-      , replHook = \pd lbi hooks flags args -> do
-          generate (fromFlagOrDefault normal (replVerbosity flags)) lbi
-          replHook simpleUserHooks pd lbi hooks flags args
+          x <- readEngineApi normal lbi
+          pure (setApiModules x lbi)
+      , -- The module list is computed again at each step after configure,
+        -- because godot-sys can be rebuilt with other build options (which
+        -- remove classes) without godot-low being configured again.
+        buildHook = \_ lbi hooks flags -> do
+          x <- generate (fromFlagOrDefault normal (buildVerbosity flags)) lbi
+          withApiModules x lbi $ \pd lbi' -> buildHook simpleUserHooks pd lbi' hooks flags
+      , haddockHook = \_ lbi hooks flags -> do
+          x <- generate (fromFlagOrDefault normal (haddockVerbosity flags)) lbi
+          withApiModules x lbi $ \pd lbi' -> haddockHook simpleUserHooks pd lbi' hooks flags
+      , replHook = \_ lbi hooks flags args -> do
+          x <- generate (fromFlagOrDefault normal (replVerbosity flags)) lbi
+          withApiModules x lbi $ \pd lbi' -> replHook simpleUserHooks pd lbi' hooks flags args
+      , copyHook = \_ lbi hooks flags -> do
+          x <- readEngineApi normal lbi
+          withApiModules x lbi $ \pd lbi' -> copyHook simpleUserHooks pd lbi' hooks flags
+      , instHook = \_ lbi hooks flags -> do
+          x <- readEngineApi normal lbi
+          withApiModules x lbi $ \pd lbi' -> instHook simpleUserHooks pd lbi' hooks flags
+      , regHook = \_ lbi hooks flags -> do
+          x <- readEngineApi normal lbi
+          withApiModules x lbi $ \pd lbi' -> regHook simpleUserHooks pd lbi' hooks flags
       }
+
+withApiModules :: ExtApi -> LocalBuildInfo -> (PackageDescription -> LocalBuildInfo -> IO a) -> IO a
+withApiModules x lbi k = let lbi' = setApiModules x lbi in k (localPkgDescr lbi') lbi'
 
 --------------------------------------------------------------------------------
 -- Driver
 
-generate :: Verbosity -> LocalBuildInfo -> IO ()
+-- | Generate the bindings, and return the API they were generated from.
+generate :: Verbosity -> LocalBuildInfo -> IO ExtApi
 generate verb lbi = do
   json <- findInterfaceJson lbi
   info verb ("godot-low: generating bindings from " ++ json)
@@ -93,9 +116,7 @@ generate verb lbi = do
   w2 <- writeIfChanged (outDir </> "Interface.hs") (genInterface env api)
   when (w1 || w2) $ notice verb ("godot-low: generated GDExtension bindings in " ++ outDir)
 
-  apiJson <- findGodotSysFile lbi "extension_api.json"
-  info verb ("godot-low: generating Godot API bindings from " ++ apiJson)
-  x <- readExtApi apiJson
+  x <- readEngineApi verb lbi
   let aenv = mkAEnv x
       root = libAutogen
       file comps = root </> joinPath comps <.> "hs"
@@ -115,6 +136,13 @@ generate verb lbi = do
     ]
   when changed $
     notice verb ("godot-low: generated " ++ show (length outputs) ++ " Godot API modules (" ++ xVersion x ++ ")")
+  -- Remove the modules of classes that are no longer generated (because
+  -- godot-sys was built with other build options).
+  let classDir = root </> "Godot" </> "Api" </> "Class"
+      current = [file comps | (comps, _) <- outputs]
+  old <- map (classDir </>) <$> listDirectory classDir
+  mapM_ removeFile [f | f <- old, f `notElem` current]
+  pure x
 
 -- | The library component's autogen directory. Generated modules must not go
 -- in the package-wide one, or other components (the test suite) would compile
@@ -128,25 +156,85 @@ readExtApi :: FilePath -> IO ExtApi
 readExtApi path =
   either (fail . (("godot-low: cannot parse " ++ path ++ ": ") ++)) pure =<< eitherDecodeFileStrict path
 
--- | Add the generated Godot.Api modules to the library.
-addApiModules :: LocalBuildInfo -> IO LocalBuildInfo
-addApiModules lbi = do
-  x <- readExtApi =<< findGodotSysFile lbi "extension_api.json"
+-- | godot-sys's @extension_api.json@, which describes a full Godot, with the
+-- classes that the build options godot-sys built Godot with remove marked as
+-- not in the engine. godot-sys installs, next to it, the arguments it ran
+-- SCons with and which classes Godot's @disable_*@ build options remove.
+readEngineApi :: Verbosity -> LocalBuildInfo -> IO ExtApi
+readEngineApi verb lbi = do
+  apiJson <- findGodotSysFile lbi "extension_api.json"
+  info verb ("godot-low: generating Godot API bindings from " ++ apiJson)
+  x <- readExtApi apiJson
+  args <- lines <$> (readFile =<< findGodotSysFile lbi "scons-arguments.txt")
+  optionsJson <- findGodotSysFile lbi "build_option_classes.json"
+  options <- either (fail . (("godot-low: cannot parse " ++ optionsJson ++ ": ") ++)) pure =<< eitherDecodeFileStrict optionsJson
+  let on = enabledOptions options args
+      removed = [c | (c, sets) <- Map.toList (boClasses options), any (all (`elem` on)) sets]
+  when (not (null on)) $
+    info verb ("godot-low: leaving out the classes that " ++ unwords on ++ " remove")
+  pure (withoutClasses removed x)
+
+-- | Mark the given classes and their subclasses as not in the engine.
+withoutClasses :: [String] -> ExtApi -> ExtApi
+withoutClasses roots x = x {xClasses = [c {clInEngine = not (removed (clName c))} | c <- xClasses x]}
+  where
+    parents = Map.fromList [(clName c, clInherits c) | c <- xClasses x]
+    removed n = n `elem` roots || maybe False removed (Map.lookup n parents >>= id)
+
+-- | godot-sys's @build_option_classes.json@.
+data BuildOptionClasses = BuildOptionClasses
+  { boImplies :: Map.Map String [String]
+  -- ^ build options that turn on others (@disable_3d@ turns on
+  -- @disable_physics_3d@, ...)
+  , boClasses :: Map.Map String [[String]]
+  -- ^ for each class a build option can remove, the sets of options that
+  -- remove it: it is removed when all the options of one set are on
+  }
+
+instance FromJSON BuildOptionClasses where
+  parseJSON = withObject "build_option_classes" $ \o ->
+    BuildOptionClasses <$> o .: "implies" <*> o .: "classes"
+
+-- | The @disable_*@ build options that the given SCons arguments turn on,
+-- with those they imply.
+enabledOptions :: BuildOptionClasses -> [String] -> [String]
+enabledOptions bo args = close [k | (k, v) <- Map.toList settings, sconsBool v == Just True]
+  where
+    -- As in SCons, a later argument overrides an earlier one.
+    settings = Map.fromList [(k, drop 1 v) | a <- args, let (k, v) = break (== '=') a, not (null v)]
+    sconsBool v
+      | map toLower v `elem` ["y", "yes", "t", "true", "1", "on", "all"] = Just True
+      | map toLower v `elem` ["n", "no", "f", "false", "0", "off", "none"] = Just False
+      | otherwise = Nothing
+    close os =
+      let os' = nub (os ++ concatMap (\o -> Map.findWithDefault [] o (boImplies bo)) os)
+       in if length os' == length os then os else close os'
+
+-- | Set the generated Godot.Api modules of the library to those of the given
+-- API (replacing any set before).
+setApiModules :: ExtApi -> LocalBuildInfo -> LocalBuildInfo
+setApiModules x lbi =
   let mods = map (fromString . intercalate ".") (apiModuleNames x)
+      pkg = localPkgDescr lbi
+      -- Those set before: the library's autogen modules under Godot.Api.
+      -- (Godot.Api and Godot.Api.Internal are written by hand.)
+      autogen = maybe [] (autogenModules . libBuildInfo) (library pkg)
+      generated m = m `elem` autogen && "Godot.Api." `isPrefixOf` prettyShow m
       addTo l =
         l
-          { exposedModules = exposedModules l ++ mods
-          , libBuildInfo = (libBuildInfo l) {autogenModules = autogenModules (libBuildInfo l) ++ mods}
+          { exposedModules = filter (not . generated) (exposedModules l) ++ mods
+          , libBuildInfo = (libBuildInfo l) {autogenModules = filter (not . generated) (autogenModules (libBuildInfo l)) ++ mods}
           }
-      pkg = localPkgDescr lbi
       -- Registration uses the exposed modules recorded in the library's
       -- ComponentLocalBuildInfo, so update those too.
       addToClbi clbi = case clbi of
         LibComponentLocalBuildInfo {} ->
-          clbi {componentExposedModules = componentExposedModules clbi ++ [ExposedModule m Nothing | m <- mods]}
+          clbi
+            { componentExposedModules =
+                filter (not . generated . exposedName) (componentExposedModules clbi) ++ [ExposedModule m Nothing | m <- mods]
+            }
         _ -> clbi
-  pure
-    lbi
+   in lbi
       { localPkgDescr = pkg {library = fmap addTo (library pkg)}
       , componentGraph = Graph.fromDistinctList (map addToClbi (Graph.toList (componentGraph lbi)))
       , componentNameMap = Map.map (map addToClbi) (componentNameMap lbi)
@@ -726,6 +814,9 @@ data ApiClass = ApiClass
   , clMethods :: [ApiFn]
   , clBrief :: Maybe String
   , clDesc :: Maybe String
+  , clInEngine :: Bool
+  -- ^ False for the classes that godot-sys's build options remove (see
+  -- 'readEngineApi')
   }
 
 -- | The build configuration godot-sys builds: single precision, 64-bit.
@@ -820,6 +911,7 @@ instance FromJSON ApiClass where
       <*> o .:? "methods" .!= []
       <*> o .:? "brief_description"
       <*> o .:? "description"
+      <*> pure True
 
 --------------------------------------------------------------------------------
 -- Godot.Api: environment and naming
@@ -845,9 +937,10 @@ data AEnv = AEnv
   , aSingletons :: [String]
   }
 
--- | Only the classes available in the engine godot-sys builds (no editor).
+-- | Only the classes available in the engine godot-sys builds (no editor,
+-- and none that its build options remove).
 coreClasses :: ExtApi -> [ApiClass]
-coreClasses x = [c | c <- xClasses x, clApiType c == "core"]
+coreClasses x = [c | c <- xClasses x, clApiType c == "core", clInEngine c]
 
 mkAEnv :: ExtApi -> AEnv
 mkAEnv x =
