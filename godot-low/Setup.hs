@@ -106,7 +106,7 @@ withApiModules x lbi k = let lbi' = setApiModules x lbi in k (localPkgDescr lbi'
 -- | Generate the bindings, and return the API they were generated from.
 generate :: Verbosity -> LocalBuildInfo -> IO ExtApi
 generate verb lbi = do
-  json <- findInterfaceJson lbi
+  json <- findGodotSysFile lbi "gdextension_interface.json"
   info verb ("godot-low: generating bindings from " ++ json)
   api <- either (fail . (("godot-low: cannot parse " ++ json ++ ": ") ++)) pure =<< eitherDecodeFileStrict json
   libAutogen <- libraryAutogenDir lbi
@@ -118,17 +118,9 @@ generate verb lbi = do
   when (w1 || w2) $ notice verb ("godot-low: generated GDExtension bindings in " ++ outDir)
 
   x <- readEngineApi verb lbi
-  let aenv = mkAEnv x
-      root = libAutogen
+  let root = libAutogen
       file comps = root </> joinPath comps <.> "hs"
-      outputs =
-        [ (["Godot", "Api", "Builtin", "Types"], genBuiltinTypes aenv)
-        , (["Godot", "Api", "Classes"], genClasses aenv)
-        , (["Godot", "Api", "GlobalEnums"], genGlobalEnums aenv x)
-        , (["Godot", "Api", "Utility"], genUtility aenv x)
-        ]
-          ++ [(["Godot", "Api", "Builtin", bcName b], genBuiltinModule aenv b) | b <- Map.elems (aBuiltins aenv)]
-          ++ [(["Godot", "Api", "Class", clName c], genClassModule aenv c) | c <- Map.elems (aClasses aenv)]
+      outputs = apiModules x
   changed <- fmap or . mapM id $
     [ do
         createDirectoryIfMissing True (takeDirectory (file comps))
@@ -176,7 +168,7 @@ readEngineApi verb lbi = do
 -- API (replacing any set before).
 setApiModules :: ExtApi -> LocalBuildInfo -> LocalBuildInfo
 setApiModules x lbi =
-  let mods = map (fromString . intercalate ".") (apiModuleNames x)
+  let mods = map (fromString . intercalate "." . fst) (apiModules x)
       pkg = localPkgDescr lbi
       -- Those set before: the library's autogen modules under Godot.Api.
       -- (Godot.Api and Godot.Api.Internal are written by hand.)
@@ -201,10 +193,6 @@ setApiModules x lbi =
       , componentGraph = Graph.fromDistinctList (map addToClbi (Graph.toList (componentGraph lbi)))
       , componentNameMap = Map.map (map addToClbi) (componentNameMap lbi)
       }
-
--- | Locate gdextension_interface.json in the include dirs of godot-sys.
-findInterfaceJson :: LocalBuildInfo -> IO FilePath
-findInterfaceJson lbi = findGodotSysFile lbi "gdextension_interface.json"
 
 -- | Locate a file installed in the include dirs of godot-sys.
 findGodotSysFile :: LocalBuildInfo -> FilePath -> IO FilePath
@@ -658,6 +646,7 @@ genInterface env api =
          , "import Data.Word"
          , "import Foreign.Ptr"
          , "import Godot.GDExtension.Types"
+         , "import System.IO.Unsafe (unsafePerformIO)"
          , ""
          , "-- | All GDExtension interface functions."
          , "data GDExtensionInterface = GDExtensionInterface"
@@ -676,13 +665,16 @@ genInterface env api =
          , ""
          , "-- | Resolve every interface function through Godot's @get_proc_address@."
          , "-- Functions this Godot build does not provide raise an error when called."
+         , "-- Deprecated functions are only looked up when first used, so that a Godot"
+         , "-- built without them (@deprecated=no@) is not asked for them."
          , "loadInterface :: GDExtensionInterfaceGetProcAddress -> IO GDExtensionInterface"
          , "loadInterface gpa = do"
          ]
-      ++ ["  p" ++ show i ++ " <- getProcAddress gpa " ++ show (fnName f) | (i, f) <- zip [0 :: Int ..] fns]
+      ++ ["  p" ++ show i ++ " <- getProcAddress gpa " ++ show (fnName f) | (i, f) <- zip [0 :: Int ..] fns, not (deprecated f)]
       ++ ["  pure GDExtensionInterface"]
       ++ [ "    " ++ (if i == 0 then "{ " else ", ") ++ interfaceFieldName f ++ " = resolve "
-             ++ show (fnName f) ++ " unwrap" ++ interfaceTypeName f ++ " p" ++ show i
+             ++ show (fnName f) ++ " unwrap" ++ interfaceTypeName f
+             ++ (if deprecated f then " (unsafePerformIO (getProcAddress gpa " ++ show (fnName f) ++ "))" else " p" ++ show i)
          | (i, f) <- zip [0 :: Int ..] fns
          ]
       ++ [ "    }"
@@ -696,6 +688,7 @@ genInterface env api =
       ++ concatMap genInterfaceType fns
   where
     fns = apiInterface api
+    deprecated f = maybe False (const True) (fnDeprecated f)
     genInterfaceType f =
       let n = interfaceTypeName f
           sig = fnSig env (fnArgs f) (fnReturn f)
@@ -899,10 +892,10 @@ data AEnv = AEnv
   , aSingletons :: [String]
   }
 
--- | Only the classes available in the engine godot-sys builds (no editor
--- classes, and none that its build options leave out).
+-- | Only the classes the Godot godot-sys built has (no editor classes, and
+-- none that its build options leave out).
 coreClasses :: ExtApi -> [ApiClass]
-coreClasses x = [c | c <- xClasses x, clApiType c == "core", clInEngine c]
+coreClasses x = filter clInEngine (xClasses x)
 
 mkAEnv :: ExtApi -> AEnv
 mkAEnv x =
@@ -1017,16 +1010,19 @@ splitLastDot s = case break (== '.') (reverse s) of
 stripPrefix :: String -> String -> Maybe String
 stripPrefix p s = if p `isPrefixOf` s then Just (drop (length p) s) else Nothing
 
--- | Module names generated from extension_api.json.
-apiModuleNames :: ExtApi -> [[String]]
-apiModuleNames x =
-  [ ["Godot", "Api", "Builtin", "Types"]
-  , ["Godot", "Api", "Classes"]
-  , ["Godot", "Api", "GlobalEnums"]
-  , ["Godot", "Api", "Utility"]
+-- | The Godot.Api modules generated from extension_api.json: their names
+-- and (lazily) their contents.
+apiModules :: ExtApi -> [([String], String)]
+apiModules x =
+  [ (["Godot", "Api", "Builtin", "Types"], genBuiltinTypes aenv)
+  , (["Godot", "Api", "Classes"], genClasses aenv)
+  , (["Godot", "Api", "GlobalEnums"], genGlobalEnums aenv x)
+  , (["Godot", "Api", "Utility"], genUtility aenv x)
   ]
-    ++ [["Godot", "Api", "Builtin", bcName b] | b <- xBuiltins x, bcName b `notElem` primitiveBuiltins]
-    ++ [["Godot", "Api", "Class", clName c] | c <- coreClasses x]
+    ++ [(["Godot", "Api", "Builtin", bcName b], genBuiltinModule aenv b) | b <- Map.elems (aBuiltins aenv)]
+    ++ [(["Godot", "Api", "Class", clName c], genClassModule aenv c) | c <- Map.elems (aClasses aenv)]
+  where
+    aenv = mkAEnv x
 
 --------------------------------------------------------------------------------
 -- BBCode documentation -> Haddock

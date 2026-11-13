@@ -144,6 +144,11 @@ flag alsa
   default:     True
   manual:      True
 
+flag deprecated
+  description: Build with the compatibility code for deprecated and removed features (Godot's deprecated build option).
+  default:     True
+  manual:      True
+
 flag optimize-none
   description: Build with Godot's optimize=none build option (at most one optimize flag; with none, Godot chooses from the target).
   default:     False

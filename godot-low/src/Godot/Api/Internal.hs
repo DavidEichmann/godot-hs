@@ -172,17 +172,19 @@ class (GodotClass a, GodotClass b) => Inherits a b
 upcast :: forall b a. Inherits a b => a -> b
 upcast = unsafeFromObjectPtr . toObjectPtr
 
--- | Create a new instance of a class (@classdb_construct_object2@), then
+-- | Create a new instance of a class (@classdb_construct_object3@), then
 -- send it @NOTIFICATION_POSTINITIALIZE@ as the GDExtension interface
 -- requires. (Without it, e.g. a @Control@'s theme cache is never filled
 -- and Godot crashes when the control enters the tree.)
 --
--- For @RefCounted@ classes the caller owns the object; release it with
--- @RefCounted.unreference@ when done.
+-- An instance of a @RefCounted@ class comes with one reference, which the
+-- caller owns: drop it (@RefCounted.unreference@, and destroy the object if
+-- that was the last reference) when done with the object, also when Godot
+-- keeps it (Godot takes references of its own).
 construct :: forall a. GodotClass a => IO a
 construct = do
   iface <- getInterface
-  p <- withStringName (godotClassName @a) (classdb_construct_object2 iface)
+  p <- withStringName (godotClassName @a) (classdb_construct_object3 iface)
   when (p == GDExtensionObjectPtr nullPtr) $
     fail ("Godot.Api.construct: cannot instantiate " ++ godotClassName @a)
   -- Object.notification(NOTIFICATION_POSTINITIALIZE, reversed = false)
@@ -204,14 +206,25 @@ singleton = do
     fail ("Godot.Api.singleton: no singleton " ++ godotClassName @a)
   pure (unsafeFromObjectPtr p)
 
--- | Checked downcast (@object_cast_to@).
+-- | Checked downcast: the object, if it is an instance of class @b@
+-- (@Object.is_class@).
 cast :: forall b a. (GodotClass a, GodotClass b) => a -> IO (Maybe b)
-cast a = do
-  iface <- getInterface
-  tag <- withStringName (godotClassName @b) (classdb_get_class_tag iface)
-  let GDExtensionObjectPtr p = toObjectPtr a
-  GDExtensionObjectPtr r <- object_cast_to iface (GDExtensionConstObjectPtr p) tag
-  pure (if r == nullPtr then Nothing else Just (unsafeFromObjectPtr (GDExtensionObjectPtr r)))
+cast a
+  | p == nullObjectPtr = pure Nothing
+  | otherwise = do
+      isB <- withStringName (godotClassName @b) $ \(GDExtensionConstStringNamePtr name) ->
+        alloca $ \r -> do
+          poke r (0 :: Word8)
+          ptrcall objectIsClass p [castPtr name] (castPtr r)
+          (/= 0) <$> peek r
+      pure (if isB then Just (unsafeFromObjectPtr p) else Nothing)
+  where
+    p = toObjectPtr a
+
+-- | @Object.is_class@.
+objectIsClass :: GDExtensionMethodBindPtr
+objectIsClass = methodBind "Object" "is_class" 2619796661
+{-# NOINLINE objectIsClass #-}
 
 -- | Object arguments are passed as a pointer to the object pointer.
 objectArg :: GodotClass a => a -> (Ptr () -> IO r) -> IO r

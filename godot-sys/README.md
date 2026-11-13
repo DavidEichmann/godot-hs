@@ -52,6 +52,7 @@ the default.
 | `x11`, `wayland` | on | without the X11 or the Wayland display server |
 | `pulseaudio`, `alsa` | on | without PulseAudio or ALSA audio |
 | `module-<name>-enabled` | on (off for `mono`, `text_server_fb`) | without (or with) the module, for each of Godot's 57 modules: `module-gdscript-enabled`, `module-regex-enabled`, `module-svg-enabled`, ... |
+| `deprecated` | on | without the compatibility code for deprecated and removed features |
 | `optimize-<level>` | off | `optimize=<level>`, for `none`, `debug`, `speed`, `speed-trace`, `size` and `size-extra` (at most one; otherwise Godot chooses from the target) |
 
 Set them for godot-sys in your `cabal.project`:
@@ -113,10 +114,11 @@ Delete the directory to free its space (about 1.2 GB) or to force a rebuild;
 2. Run `scripts/update-extension-api.sh` and commit the new
    `extension_api.json`. The build refuses an `extension_api.json` whose
    version doesn't match `godotTag`.
-3. Check that the flags in `godot-sys.cabal` and `buildOptions`,
-   `godotModules` and `optimizeLevels` in `Setup.hs` still match Godot's
-   build options. A build fails if `godotModules` names a module Godot no
-   longer has, and says which of its modules have no flag.
+3. Check that the flags in `godot-sys.cabal` still match Godot's build
+   options. Setup.hs takes the options and their defaults from the flags
+   themselves, so adding one is just adding the flag. Building Godot fails if
+   a `module-*-enabled` flag names a module Godot no longer has, and lists
+   the modules that have no flag.
 
 ## extension_api.json
 

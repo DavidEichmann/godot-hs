@@ -8,13 +8,20 @@
 # (godotUrl / godotSha256 in Setup.hs) and dumps the API, with documentation.
 # Run it whenever the pinned version changes and commit the result.
 #
-# Environment:
-#   GODOT_SOURCE_DIR  use this unpacked Godot source tree (must be the pinned
-#                     version) instead of downloading the pinned tarball.
-#                     The editor build is incremental in that tree.
-#   GODOT_JOBS        parallel SCons jobs (default: nproc).
+# By default it uses the source tree in godot-sys's cache (see "The build
+# cache" in README.md), unpacking the pinned tarball there first if needed,
+# and holds the cache's lock while it builds, as godot-sys's builds do. The
+# editor build is incremental in that tree, and does not disturb godot-sys's
+# builds of other targets in it.
 #
-# Requires: scons and Godot's Linux build dependencies, curl, tar, sha256sum.
+# Environment:
+#   GODOT_SOURCE_DIR     use this unpacked Godot source tree (must be the
+#                        pinned version) instead.
+#   GODOT_SYS_CACHE_DIR  godot-sys's cache (default: ~/.cache/godot-sys).
+#   GODOT_JOBS           parallel SCons jobs (default: nproc).
+#
+# Requires: scons and Godot's Linux build dependencies, python3, curl, tar,
+# sha256sum.
 set -euo pipefail
 
 pkg_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,20 +33,42 @@ if [[ -z "$tag" || -z "$sha256" ]]; then
   exit 1
 fi
 
+cache="${GODOT_SYS_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/godot-sys}"
+if [[ -z "${GODOT_SOURCE_DIR:-}" && -z "${GODOT_SYS_CACHE_LOCKED:-}" ]]; then
+  # Run the rest with the cache locked. (Setup.hs locks it with GHC's hLock,
+  # an fcntl lock, which conflicts with Python's lockf.)
+  mkdir -p "$cache"
+  export GODOT_SYS_CACHE_LOCKED=1
+  exec python3 -c '
+import fcntl, subprocess, sys
+lock = open(sys.argv[1], "a")
+fcntl.lockf(lock, fcntl.LOCK_EX)
+sys.exit(subprocess.call(sys.argv[2:]))
+' "$cache/lock" "$0" "$@"
+fi
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 if [[ -n "${GODOT_SOURCE_DIR:-}" ]]; then
   src="$(cd "$GODOT_SOURCE_DIR" && pwd)"
 else
-  tarball="godot-$tag.tar.xz"
-  echo "Downloading Godot $tag source..."
-  curl --fail --location --silent --show-error -o "$work/$tarball" \
-    "https://github.com/godotengine/godot-builds/releases/download/$tag/$tarball"
-  echo "$sha256  $work/$tarball" | sha256sum --check --quiet
-  src="$work/godot-$tag"
-  mkdir "$src"
-  tar -xJf "$work/$tarball" -C "$src" --strip-components=1
+  # The same layout as Setup.hs's obtainSource / obtainTarball.
+  src="$cache/godot-$tag"
+  if [[ "$(cat "$src/.godot-sys-unpacked" 2>/dev/null)" != "$sha256" ]]; then
+    tarball="$cache/godot-$tag.tar.xz"
+    if ! echo "$sha256  $tarball" | sha256sum --check --quiet 2>/dev/null; then
+      echo "Downloading Godot $tag source..."
+      curl --fail --location --silent --show-error -o "$tarball.download" \
+        "https://github.com/godotengine/godot-builds/releases/download/$tag/godot-$tag.tar.xz"
+      mv "$tarball.download" "$tarball"
+      echo "$sha256  $tarball" | sha256sum --check --quiet
+    fi
+    rm -rf "$src"
+    mkdir -p "$src"
+    tar -xJf "$tarball" -C "$src" --strip-components=1
+    printf '%s' "$sha256" > "$src/.godot-sys-unpacked"
+  fi
 fi
 
 echo "Building the Godot $tag editor in $src ..."

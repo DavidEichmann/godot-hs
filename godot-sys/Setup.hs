@@ -13,18 +13,23 @@
 --   library.
 module Main (main) where
 
-import Control.Exception (IOException, throwIO, try)
+import Control.Exception (throwIO)
 import Control.Monad (filterM, forM_, unless, when)
 import Data.Char (isSpace)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
+import Data.Maybe (fromMaybe)
+import Distribution.Simple.PackageDescription (readGenericPackageDescription)
 import Distribution.PackageDescription
   ( BuildInfo (..),
-    GenericPackageDescription,
+    FlagAssignment,
+    GenericPackageDescription (..),
     HookedBuildInfo,
     Library (..),
     PackageDescription (..),
+    PackageFlag (..),
     lookupFlagAssignment,
     mkFlagName,
+    unFlagName,
   )
 import Distribution.Simple
 import Distribution.Simple.InstallDirs (CopyDest (..), InstallDirs (..))
@@ -49,7 +54,7 @@ import Distribution.Simple.Setup
   )
 import Distribution.Simple.Utils (info, notice)
 import Distribution.Utils.Path (getSymbolicPath, makeSymbolicPath)
-import Distribution.Verbosity (Verbosity, normal)
+import Distribution.Verbosity (Verbosity, normal, silent)
 import GHC.Conc (getNumProcessors)
 import GHC.IO.Handle.Lock (LockMode (..), hLock, hTryLock)
 import System.Directory
@@ -87,100 +92,84 @@ data GodotConfig = GodotConfig
   { gcKind :: LibKind,
     -- | SCons @target=@
     gcTarget :: String,
-    -- | SCons arguments for the 'buildOptions' and modules whose flags
-    -- differ from Godot's defaults, and the @optimize@ flag
-    gcOptions :: [String]
+    -- | SCons arguments for the build options whose flags differ from their
+    -- defaults (see 'sconsOptions')
+    gcOptions :: [String],
+    -- | The modules that have a flag
+    gcModules :: [String]
   }
 
-godotConfig :: LocalBuildInfo -> GodotConfig
-godotConfig lbi =
-  GodotConfig
-    { gcKind = if flag "shared" then Shared else Static,
-      gcTarget = if flag "release" then "template_release" else "template_debug",
-      gcOptions =
-        [ option ++ "=" ++ (if on then "yes" else "no")
-        | (option, def) <- buildOptions ++ moduleOptions,
-          let on = flag (optionFlag option),
-          on /= def
-        ]
-          ++ case filter (flag . optionFlag . ("optimize_" ++)) optimizeLevels of
-            [] -> []
-            [level] -> ["optimize=" ++ level]
-            levels -> error ("godot-sys: more than one optimize flag is on: " ++ unwords (map (optionFlag . ("optimize_" ++)) levels))
-    }
+-- | The configuration, from the flags. Their defaults (which 'sconsOptions'
+-- compares them with) are read from godot-sys.cabal: the configured package
+-- only has the flags' values.
+godotConfig :: LocalBuildInfo -> IO GodotConfig
+godotConfig lbi = do
+  gpd <- readGenericPackageDescription silent Nothing (makeSymbolicPath (interpretSymbolicPathLBI lbi (makeSymbolicPath "godot-sys.cabal")))
+  options <- either failWith pure (sconsOptions gpd (flagAssignment lbi))
+  pure
+    GodotConfig
+      { gcKind = if flag "shared" then Shared else Static,
+        gcTarget = if flag "release" then "template_release" else "template_debug",
+        gcOptions = options,
+        gcModules = flagModules gpd
+      }
   where
-    flag n = case lookupFlagAssignment (mkFlagName n) (flagAssignment lbi) of
-      Just on -> on
-      Nothing -> error ("godot-sys: godot-sys.cabal has no flag " ++ n)
+    flag n = lookupFlagAssignment (mkFlagName n) (flagAssignment lbi) == Just True
 
--- | The Godot build options that have a flag, with Godot's defaults. They
--- are the options of Godot's build profiles (the editor's "Engine Compilation
--- Configuration") that apply to Linux, except the modules (see
--- 'moduleOptions'), and the rest of SConstruct's @disable_*@ features. Only
--- those that differ from the default are passed to SCons, so that the
--- default build is cached under the same key as before there were flags.
-buildOptions :: [(String, Bool)]
-buildOptions =
-  [ ("disable_3d", False),
-    ("disable_advanced_gui", False),
-    ("disable_physics_2d", False),
-    ("disable_physics_3d", False),
-    ("disable_navigation_2d", False),
-    ("disable_navigation_3d", False),
-    ("disable_xr", False),
-    ("vulkan", True),
-    ("opengl3", True),
-    ("accesskit", True),
-    ("sdl", True),
-    ("brotli", True),
-    ("x11", True),
-    ("wayland", True),
-    ("pulseaudio", True),
-    ("alsa", True)
+-- | The SCons arguments for Godot's build options, from godot-sys's flags.
+-- Every flag except @shared@ and @release@ is a build option of the same
+-- name with @_@ for @-@, and Godot's default as its default (@disable-3d@ is
+-- @disable_3d@, @module-svg-enabled@ is @module_svg_enabled@), except that
+-- @optimize-\<level\>@ is @optimize=\<level\>@. Only the options whose
+-- flags differ from their defaults are passed (and @optimize@ last), so that
+-- the default build keeps its cache key.
+sconsOptions :: GenericPackageDescription -> FlagAssignment -> Either String [String]
+sconsOptions gpd assignment = case optimize of
+  _ : _ : _ -> Left ("more than one optimize flag is on: " ++ unwords (map ("optimize-" ++) optimize))
+  _ ->
+    Right $
+      [ sconsName name ++ "=" ++ (if on then "yes" else "no")
+      | (name, def, on) <- options,
+        not ("optimize-" `isPrefixOf` name),
+        on /= def
+      ]
+        ++ ["optimize=" ++ sconsName level | level <- optimize]
+  where
+    options =
+      [ (name, flagDefault f, fromMaybe (flagDefault f) (lookupFlagAssignment (flagName f) assignment))
+      | f <- genPackageFlags gpd,
+        let name = unFlagName (flagName f),
+        name `notElem` ["shared", "release"]
+      ]
+    optimize = [drop (length "optimize-") name | (name, _, True) <- options, "optimize-" `isPrefixOf` name]
+
+-- | The modules that have a flag (@module-\<name\>-enabled@).
+flagModules :: GenericPackageDescription -> [String]
+flagModules gpd =
+  [ sconsName (take (length rest - length "-enabled") rest)
+  | f <- genPackageFlags gpd,
+    let name = unFlagName (flagName f),
+    "module-" `isPrefixOf` name,
+    "-enabled" `isSuffixOf` name,
+    let rest = drop (length "module-") name
   ]
 
--- | @module_\<name\>_enabled@ for each of Godot's modules, with Godot's
--- default: all are built except mono and text_server_fb. (SCons's
--- @modules_enabled_by_default=no@, which turns the defaults off, has no flag:
--- godot-sys could not tell a module flag that is on by default from one
--- turned on, so it could not tell which modules to keep.) 'checkModules'
--- checks the list against the Godot source.
-moduleOptions :: [(String, Bool)]
-moduleOptions = [("module_" ++ m ++ "_enabled", m `notElem` ["mono", "text_server_fb"]) | m <- godotModules]
+-- | A build option's name: the flag's with @_@ for @-@.
+sconsName :: String -> String
+sconsName = map (\c -> if c == '-' then '_' else c)
 
-godotModules :: [String]
-godotModules =
-  [ "astcenc", "basis_universal", "bcdec", "betsy", "bmp", "camera", "csg", "cvtt", "dds", "enet",
-    "etcpak", "fbx", "freetype", "gdscript", "glslang", "gltf", "godot_physics_2d", "godot_physics_3d",
-    "gridmap", "hdr", "interactive_music", "jolt_physics", "jpg", "jsonrpc", "ktx", "lightmapper_rd",
-    "mbedtls", "meshoptimizer", "mobile_vr", "mono", "mp3", "msdfgen", "multiplayer", "navigation_2d",
-    "navigation_3d", "noise", "objectdb_profiler", "ogg", "openxr", "raycast", "regex", "svg",
-    "text_server_adv", "text_server_fb", "tga", "theora", "tinyexr", "upnp", "vhacd", "visual_shader",
-    "vorbis", "webp", "webrtc", "websocket", "webxr", "xatlas_unwrap", "zip"
-  ]
-
--- | The values of SCons's @optimize@ option that have a flag
--- (@optimize-size@ for @optimize=size@, ...); without one Godot chooses from
--- the target. (@custom@ needs compiler flags given otherwise.)
-optimizeLevels :: [String]
-optimizeLevels = ["none", "debug", "speed", "speed_trace", "size", "size_extra"]
-
--- | Check that 'godotModules' are Godot's modules, so that the flags keep up
--- when the pinned version changes.
-checkModules :: Verbosity -> FilePath -> IO ()
-checkModules verb src = do
+-- | Check that the modules that have flags are Godot's modules, so that the
+-- flags keep up when the pinned version changes.
+checkModules :: Verbosity -> FilePath -> GodotConfig -> IO ()
+checkModules verb src cfg = do
   dirs <- listDirectory (src </> "modules")
   modules <- filterM (\m -> doesFileExist (src </> "modules" </> m </> "config.py")) dirs
-  let unknown = filter (`notElem` modules) godotModules
-      missing = filter (`notElem` godotModules) modules
+  let unknown = filter (`notElem` modules) (gcModules cfg)
+      missing = filter (`notElem` gcModules cfg) modules
   unless (null unknown) $
-    failWith ("godotModules in Setup.hs names modules Godot " ++ godotTag ++ " does not have: " ++ unwords unknown)
+    failWith ("godot-sys.cabal has flags for modules Godot " ++ godotTag ++ " does not have: " ++ unwords unknown)
   unless (null missing) $
-    notice verb ("godot-sys: Godot " ++ godotTag ++ " modules without a flag (add them to godotModules and godot-sys.cabal): " ++ unwords missing)
-
--- | The flag for a build option: its name with @-@ for @_@.
-optionFlag :: String -> String
-optionFlag = map (\c -> if c == '_' then '-' else c)
+    notice verb ("godot-sys: Godot " ++ godotTag ++ " modules without a flag in godot-sys.cabal: " ++ unwords missing)
 
 libFileName :: LibKind -> FilePath
 libFileName Static = "libgodot.a"
@@ -218,8 +207,8 @@ godotConfHook ::
 godotConfHook args flags = do
   lbi <- confHook simpleUserHooks args flags
   bdir <- absBuildDir lbi
-  let cfg = godotConfig lbi
-      pkg = localPkgDescr lbi
+  cfg <- godotConfig lbi
+  let pkg = localPkgDescr lbi
       inst = absoluteInstallDirs pkg lbi NoCopyDest
       libDirs = [bdir, libdir inst]
       incDirs = [bdir </> "include", includedir inst]
@@ -302,7 +291,7 @@ buildGodot :: Verbosity -> LocalBuildInfo -> IO ()
 buildGodot verb lbi = do
   bdir <- absBuildDir lbi
   createDirectoryIfMissing True bdir
-  let cfg = godotConfig lbi
+  cfg <- godotConfig lbi
   jobs <- maybe (show <$> getNumProcessors) pure =<< lookupEnv "GODOT_SYS_JOBS"
   extra <- maybe [] words <$> lookupEnv "GODOT_SYS_SCONS_FLAGS"
   let sconsArgs =
@@ -344,16 +333,13 @@ buildGodot verb lbi = do
         if done
           then notice verb ("godot-sys: using the cached Godot build in " ++ out)
           else do
-            src <- obtainSource verb cache bdir
+            src <- obtainSource verb cache
             removeIfExists out
             sconsBuild verb src cfg (sconsArgs ++ [jobsArg]) out
             writeFile complete (unlines sconsArgs)
         -- (Also for a build cached before godot-sys listed the classes.)
         listed <- doesFileExist (out </> "include" </> engineClassesFile)
         unless listed $ listClasses verb lbi cfg out
-      -- The source tree used to live in each build directory.
-      removeIfExists (bdir </> ("godot-" ++ godotTag))
-      removeIfExists (bdir </> ("godot-" ++ godotTag ++ ".tar.xz"))
       pure out
   -- Stage a copy (not a link, so that the build directory stays usable if
   -- the cache is cleared).
@@ -373,7 +359,7 @@ buildGodot verb lbi = do
 sconsBuild :: Verbosity -> FilePath -> GodotConfig -> [String] -> FilePath -> IO ()
 sconsBuild verb src cfg sconsArgs out = do
   notice verb ("godot-sys: building Godot " ++ godotTag ++ " (" ++ unwords sconsArgs ++ ")")
-  checkModules verb src
+  checkModules verb src cfg
   -- The merge below takes every archive of this target in bin/obj, but SCons
   -- leaves those of an earlier configuration there (e.g. modules it enabled
   -- and this one disables), which then add dead weight or clash. Remove
@@ -461,49 +447,29 @@ withCacheLock verb cache action =
     action
 
 -- | Locate (and if necessary download, verify and unpack) the Godot source
--- in the cache. A tree left in the build directory by an older godot-sys,
--- which kept it there, is moved into the cache rather than rebuilt.
-obtainSource :: Verbosity -> FilePath -> FilePath -> IO FilePath
-obtainSource verb cache bdir = do
-  let name = "godot-" ++ godotTag
-      src = cache </> name
-      unpacked dir = doesFileExist (dir </> ".godot-sys-unpacked")
-  done <- unpacked src
+-- in the cache.
+obtainSource :: Verbosity -> FilePath -> IO FilePath
+obtainSource verb cache = do
+  let src = cache </> ("godot-" ++ godotTag)
+  done <- doesFileExist (src </> ".godot-sys-unpacked")
   unless done $ do
-    legacy <- unpacked (bdir </> name)
-    moved <-
-      if not legacy
-        then pure False
-        else do
-          removeIfExists src
-          r <- try (renameDirectory (bdir </> name) src) :: IO (Either IOException ())
-          case r of
-            Right () -> notice verb ("godot-sys: moved the Godot source tree to " ++ src) >> pure True
-            Left _ -> pure False -- e.g. another file system: unpack instead
-    unless moved $ do
-      tarball <- obtainTarball verb cache bdir
-      notice verb ("godot-sys: unpacking " ++ tarball)
-      removeIfExists src
-      createDirectoryIfMissing True src
-      run cache "tar" ["-xJf", tarball, "-C", src, "--strip-components=1"]
-      writeFile (src </> ".godot-sys-unpacked") godotSha256
+    tarball <- obtainTarball verb cache
+    notice verb ("godot-sys: unpacking " ++ tarball)
+    removeIfExists src
+    createDirectoryIfMissing True src
+    run cache "tar" ["-xJf", tarball, "-C", src, "--strip-components=1"]
+    writeFile (src </> ".godot-sys-unpacked") godotSha256
   pure src
 
-obtainTarball :: Verbosity -> FilePath -> FilePath -> IO FilePath
-obtainTarball verb cache bdir = do
+obtainTarball :: Verbosity -> FilePath -> IO FilePath
+obtainTarball verb cache = do
   local <- lookupEnv "GODOT_SYS_TARBALL"
   path <- case local of
     Just p -> makeAbsolute p
     Nothing -> do
-      let file = "godot-" ++ godotTag ++ ".tar.xz"
-          p = cache </> file
-      -- One left in the build directory by an older godot-sys.
-      legacy <- doesFileExist (bdir </> file)
+      let p = cache </> ("godot-" ++ godotTag ++ ".tar.xz")
       have <- doesFileExist p
-      when (legacy && not have) $
-        () <$ (try (renameFile (bdir </> file) p) :: IO (Either IOException ()))
-      have' <- doesFileExist p
-      good <- if have' then (== godotSha256) <$> sha256 p else pure False
+      good <- if have then (== godotSha256) <$> sha256 p else pure False
       unless good $ do
         notice verb ("godot-sys: downloading " ++ godotUrl)
         let tmp = p <.> "download"
@@ -599,8 +565,8 @@ stageExtensionApi lbi inc = do
 installGodot :: Verbosity -> PackageDescription -> LocalBuildInfo -> CopyDest -> IO ()
 installGodot verb pkg lbi dest = do
   bdir <- absBuildDir lbi
-  let cfg = godotConfig lbi
-      inst = absoluteInstallDirs pkg lbi dest
+  cfg <- godotConfig lbi
+  let inst = absoluteInstallDirs pkg lbi dest
       lib = libFileName (gcKind cfg)
   createDirectoryIfMissing True (libdir inst)
   notice verb ("godot-sys: installing " ++ lib ++ " to " ++ libdir inst)

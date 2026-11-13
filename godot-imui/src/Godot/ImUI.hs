@@ -666,7 +666,9 @@ radioButtonsWith RadioButtonsOpts {..} options selected = layout tooltip expand 
       b <- CheckBox.construct
       -- In a group (of its own) a checkbox looks like a radio button, and
       -- cannot be unchecked by clicking it.
-      BaseButton.setButtonGroup b =<< ButtonGroup.construct
+      group <- ButtonGroup.construct
+      BaseButton.setButtonGroup b group
+      release group -- the button keeps its own reference
       pure b
     syncText w s (Button.setText b)
     enable w enabled (BaseButton.setDisabled b . not)

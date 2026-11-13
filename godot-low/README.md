@@ -42,6 +42,7 @@ r    <- Utility.sqrt 9                                -- 3.0
 | `Godot.Api.Builtin.<Name>` | constructors (`new`, `newFromFloatFloatFloat`, …), methods and operators (`opAddVector3`, …) of that builtin |
 | `Godot.Api.GlobalEnums` | `Error`, `Key`, `Variant_Type`, … |
 | `Godot.Api.Utility` | `sin`, `print`, `absi`, … (import qualified) |
+| `Godot.Api.Embed` | `withGodot`: run Godot in this process (see [Embedding Godot](#embedding-godot)) |
 | `Godot.Api.Internal` | the runtime the generated code is built on (method-bind caches, ptrcall marshalling) |
 
 Conventions:
@@ -56,15 +57,21 @@ Conventions:
 - Vararg methods (`Object.call`, `emit_signal`, `print`, …) take all
   arguments as `[Variant]`; use `toVariant` / `fromVariant`.
 - Method binds are looked up on first call and cached. Call `initialize`
-  first, and only use a class after Godot has registered it (scene classes
-  after the scene initialization level / `GodotInstance.start`).
+  first (`withGodot` does), and only use a class after Godot has registered
+  it (scene classes after the scene initialization level /
+  `GodotInstance.start`).
+- `construct` makes a new object. An object of a `RefCounted` class comes
+  with one reference, which is yours: drop it (`RefCounted.unreference`)
+  when done with the object, also when you have given it to Godot, which
+  takes references of its own.
 - `newCallable` turns a Haskell function into a Godot `Callable`, e.g. to
   connect to a signal: `Object.connect button pressed callback 0`.
 - Not (yet) covered: default arguments (all arguments are required),
   properties and signals as first-class values (use their getter/setter
   methods and `connect`/`emit_signal`), subclassing engine classes from
   Haskell (virtual methods), and reference counting of `RefCounted`
-  objects (returned objects carry a reference you must release).
+  objects (returned and constructed objects carry a reference you must
+  release).
 
 ## Godot.GDExtension: the C interface
 
@@ -90,19 +97,22 @@ Conventions:
 
 ## Embedding Godot
 
-```haskell
-initFn <- wrapGDExtensionInitializationFunction $ \gpa library rInit -> do
-  _ <- Godot.Api.initialize gpa library
-  poke rInit GDExtensionInitialization { ... }
-  pure 1
+`Godot.Api.Embed.withGodot` runs Godot in this process: it writes the
+project, creates the instance (loading the GDExtension interface with
+`initialize`), starts it and runs your action with it, then destroys it.
 
-withGodotArgs ["app", "--headless", "--path", projectDir] $ \argc argv -> do
-  instPtr <- createGodotInstance argc argv initFn
-  let inst = unsafeFromObjectPtr @GodotInstance instPtr
-  _ <- GodotInstance.start inst          -- engine classes now available
-  ...                                    -- GodotInstance.iteration inst per frame
-  destroyGodotInstance instPtr
+```haskell
+withGodot defaultProject ["--headless"] $ \inst -> do
+  ...                                    -- engine classes are available
+  quit <- GodotInstance.iteration inst   -- once per frame
+  ...
 ```
+
+libgodot is an export template and needs a project to start, so `withGodot`
+writes one to a temporary directory: `project.godot` and an empty main
+scene, plus the settings and files in the `Project` you give it. Godot
+cannot be started twice in a process. (`Godot.GDExtension`'s
+`createGodotInstance` is the lower-level way.)
 
 See [test/Main.hs](test/Main.hs) for a complete program, and
 [example/Main.hs](example/Main.hs) for a minimal "hello world" UI that opens
@@ -112,10 +122,8 @@ a window with a centred `Label`:
 cabal run godot-low-example
 ```
 
-libgodot is an export template and needs a project to start, so the example
-writes a throwaway one (just `project.godot` and an empty main scene) to the
-temporary directory; the UI itself is created at runtime through
-`Godot.Api`. For building UIs, see [godot-imui](../godot-imui).
+The UI is created at runtime through `Godot.Api`; the project only has a
+few settings. For building UIs, see [godot-imui](../godot-imui).
 
 ## How generation works
 
