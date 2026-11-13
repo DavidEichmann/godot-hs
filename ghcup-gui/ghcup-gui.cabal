@@ -1,0 +1,49 @@
+cabal-version:      3.0
+name:               ghcup-gui
+version:            0.1.0.0
+synopsis:           A graphical interface to GHCup, the Haskell toolchain installer
+description:
+  A port of GHCup's terminal UI (@ghcup tui@) to a desktop window, built with
+  godot-imui. It only implements the user interface: installing, setting,
+  removing and compiling tools is done by the @ghcup@ library.
+license:            LGPL-3.0-only
+license-file:       LICENSE
+author:             David Eichmann
+maintainer:         eichmannd@gmail.com
+category:           System
+build-type:         Simple
+extra-doc-files:    README.md
+tested-with:        GHC == 9.12.2
+
+source-repository head
+  type:     git
+  location: .
+  subdir:   ghcup-gui
+
+executable ghcup-gui
+  main-is:          Main.hs
+  hs-source-dirs:   app src
+  other-modules:
+    GHCup.GUI.Actions
+    GHCup.GUI.App
+    GHCup.GUI.Forms
+    GHCup.GUI.Setup
+  build-depends:
+    , async             >=2.2    && <2.3
+    , base              >=4.14   && <5
+    , containers        >=0.6    && <0.9
+    , filepath          >=1.4    && <1.6
+    , ghcup             ==0.2.6.*
+    , godot-imui        ==0.1.*
+    , mtl               >=2.2    && <2.4
+    , pretty            >=1.1    && <1.2
+    , process           >=1.6    && <1.7
+    , resourcet         >=1.2    && <1.4
+    , safe-exceptions   >=0.1    && <0.2
+    , text              >=2.0    && <2.2
+    , time              >=1.9    && <1.17
+    , uri-bytestring    >=0.4    && <0.5
+    , variant           >=1.0    && <1.1
+    , versions          >=6.0    && <6.1
+  ghc-options:      -Wall -threaded
+  default-language: GHC2021

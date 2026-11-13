@@ -2,6 +2,7 @@ packages:
   godot-sys
   godot-low
   godot-imui
+  ghcup-gui
 
 tests: True
 
@@ -28,3 +29,14 @@ package godot-sys
     -module-visual-shader-enabled -module-vorbis-enabled
     -module-webrtc-enabled -module-websocket-enabled
     -module-xatlas-unwrap-enabled -module-zip-enabled
+
+-- ghcup-gui only needs the ghcup library: no TUI (brick), no executable, and
+-- the pure Haskell tar package instead of the C libarchive.
+package ghcup
+  flags: -tui +no-exe +tar
+
+-- ... and zip (which ghcup uses with +tar) without bzip2 entries, which need
+-- the bzip2 C library's development files (libbz2-dev). ghcup's .tar.bz2
+-- bindists are unpacked by the bz2 package, which has its own copy.
+package zip
+  flags: +disable-bzip2
