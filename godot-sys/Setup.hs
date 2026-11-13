@@ -87,8 +87,8 @@ data GodotConfig = GodotConfig
   { gcKind :: LibKind,
     -- | SCons @target=@
     gcTarget :: String,
-    -- | SCons arguments for the 'buildOptions' that differ from Godot's
-    -- defaults
+    -- | SCons arguments for the 'buildOptions' and modules whose flags
+    -- differ from Godot's defaults, and the @optimize@ flag
     gcOptions :: [String]
   }
 
@@ -99,10 +99,14 @@ godotConfig lbi =
       gcTarget = if flag "release" then "template_release" else "template_debug",
       gcOptions =
         [ option ++ "=" ++ (if on then "yes" else "no")
-        | (option, def) <- buildOptions,
+        | (option, def) <- buildOptions ++ moduleOptions,
           let on = flag (optionFlag option),
           on /= def
         ]
+          ++ case filter (flag . optionFlag . ("optimize_" ++)) optimizeLevels of
+            [] -> []
+            [level] -> ["optimize=" ++ level]
+            levels -> error ("godot-sys: more than one optimize flag is on: " ++ unwords (map (optionFlag . ("optimize_" ++)) levels))
     }
   where
     flag n = case lookupFlagAssignment (mkFlagName n) (flagAssignment lbi) of
@@ -111,10 +115,10 @@ godotConfig lbi =
 
 -- | The Godot build options that have a flag, with Godot's defaults. They
 -- are the options of Godot's build profiles (the editor's "Engine Compilation
--- Configuration") that apply to Linux, except the modules, and the rest of
--- SConstruct's @disable_*@ features. Only those that differ from the default
--- are passed to SCons, so that the default build is cached under the same
--- key as before there were flags.
+-- Configuration") that apply to Linux, except the modules (see
+-- 'moduleOptions'), and the rest of SConstruct's @disable_*@ features. Only
+-- those that differ from the default are passed to SCons, so that the
+-- default build is cached under the same key as before there were flags.
 buildOptions :: [(String, Bool)]
 buildOptions =
   [ ("disable_3d", False),
@@ -134,6 +138,45 @@ buildOptions =
     ("pulseaudio", True),
     ("alsa", True)
   ]
+
+-- | @module_\<name\>_enabled@ for each of Godot's modules, with Godot's
+-- default: all are built except mono and text_server_fb. (SCons's
+-- @modules_enabled_by_default=no@, which turns the defaults off, has no flag:
+-- godot-sys could not tell a module flag that is on by default from one
+-- turned on, so it could not tell which modules to keep.) 'checkModules'
+-- checks the list against the Godot source.
+moduleOptions :: [(String, Bool)]
+moduleOptions = [("module_" ++ m ++ "_enabled", m `notElem` ["mono", "text_server_fb"]) | m <- godotModules]
+
+godotModules :: [String]
+godotModules =
+  [ "astcenc", "basis_universal", "bcdec", "betsy", "bmp", "camera", "csg", "cvtt", "dds", "enet",
+    "etcpak", "fbx", "freetype", "gdscript", "glslang", "gltf", "godot_physics_2d", "godot_physics_3d",
+    "gridmap", "hdr", "interactive_music", "jolt_physics", "jpg", "jsonrpc", "ktx", "lightmapper_rd",
+    "mbedtls", "meshoptimizer", "mobile_vr", "mono", "mp3", "msdfgen", "multiplayer", "navigation_2d",
+    "navigation_3d", "noise", "objectdb_profiler", "ogg", "openxr", "raycast", "regex", "svg",
+    "text_server_adv", "text_server_fb", "tga", "theora", "tinyexr", "upnp", "vhacd", "visual_shader",
+    "vorbis", "webp", "webrtc", "websocket", "webxr", "xatlas_unwrap", "zip"
+  ]
+
+-- | The values of SCons's @optimize@ option that have a flag
+-- (@optimize-size@ for @optimize=size@, ...); without one Godot chooses from
+-- the target. (@custom@ needs compiler flags given otherwise.)
+optimizeLevels :: [String]
+optimizeLevels = ["none", "debug", "speed", "speed_trace", "size", "size_extra"]
+
+-- | Check that 'godotModules' are Godot's modules, so that the flags keep up
+-- when the pinned version changes.
+checkModules :: Verbosity -> FilePath -> IO ()
+checkModules verb src = do
+  dirs <- listDirectory (src </> "modules")
+  modules <- filterM (\m -> doesFileExist (src </> "modules" </> m </> "config.py")) dirs
+  let unknown = filter (`notElem` modules) godotModules
+      missing = filter (`notElem` godotModules) modules
+  unless (null unknown) $
+    failWith ("godotModules in Setup.hs names modules Godot " ++ godotTag ++ " does not have: " ++ unwords unknown)
+  unless (null missing) $
+    notice verb ("godot-sys: Godot " ++ godotTag ++ " modules without a flag (add them to godotModules and godot-sys.cabal): " ++ unwords missing)
 
 -- | The flag for a build option: its name with @-@ for @_@.
 optionFlag :: String -> String
@@ -330,6 +373,7 @@ buildGodot verb lbi = do
 sconsBuild :: Verbosity -> FilePath -> GodotConfig -> [String] -> FilePath -> IO ()
 sconsBuild verb src cfg sconsArgs out = do
   notice verb ("godot-sys: building Godot " ++ godotTag ++ " (" ++ unwords sconsArgs ++ ")")
+  checkModules verb src
   -- The merge below takes every archive of this target in bin/obj, but SCons
   -- leaves those of an earlier configuration there (e.g. modules it enabled
   -- and this one disables), which then add dead weight or clash. Remove

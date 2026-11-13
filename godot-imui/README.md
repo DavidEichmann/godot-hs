@@ -280,18 +280,30 @@ your `cabal.project`:
 
 ```cabal
 package godot-sys
-  flags: +release +disable-3d +disable-physics-2d +disable-navigation-2d -vulkan -sdl
+  flags:
+    +release +optimize-size
+    +disable-3d +disable-physics-2d +disable-navigation-2d -vulkan -sdl
+    -module-astcenc-enabled -module-basis-universal-enabled
+    -module-bcdec-enabled -module-betsy-enabled -module-bmp-enabled
+    -module-camera-enabled -module-cvtt-enabled -module-dds-enabled
+    -module-enet-enabled -module-etcpak-enabled -module-gdscript-enabled
+    -module-glslang-enabled -module-hdr-enabled
+    -module-interactive-music-enabled -module-jsonrpc-enabled
+    -module-ktx-enabled -module-lightmapper-rd-enabled -module-mbedtls-enabled
+    -module-mp3-enabled -module-msdfgen-enabled -module-multiplayer-enabled
+    -module-noise-enabled -module-objectdb-profiler-enabled -module-ogg-enabled
+    -module-raycast-enabled -module-regex-enabled -module-tga-enabled
+    -module-theora-enabled -module-tinyexr-enabled -module-upnp-enabled
+    -module-visual-shader-enabled -module-vorbis-enabled
+    -module-webrtc-enabled -module-websocket-enabled
+    -module-xatlas-unwrap-enabled -module-zip-enabled
 ```
 
-and, to leave out the Godot modules it does not use either, build with:
-
-```sh
-export GODOT_SYS_SCONS_FLAGS="optimize=size modules_enabled_by_default=no module_freetype_enabled=yes module_text_server_adv_enabled=yes module_svg_enabled=yes module_jpg_enabled=yes module_webp_enabled=yes"
-```
-
-(GDScript, regular expressions, audio formats, networking and the image
-formats other than PNG, JPEG, SVG and WebP are then gone.) With both, the
-example is 55 MB (37 MB stripped) instead of 120 MB. godot-sys's
+The modules left are FreeType and the text server (fonts), and SVG, JPEG and
+WebP images (PNG is built in); the 3D, physics and navigation modules go
+with the `disable-*` flags. GDScript, regular expressions, audio formats and
+networking are gone. The example is then 55 MB (37 MB stripped) instead of
+120 MB. godot-sys's
 `disable-advanced-gui` and `-opengl3` cannot be used: godot-imui's menus,
 trees, text areas and dialogs are Godot's advanced controls, and it renders
 with OpenGL. See [godot-sys](../godot-sys#build-options) for the options.

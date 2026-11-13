@@ -51,6 +51,8 @@ the default.
 | `brotli` | on | without Brotli (WOFF2 fonts) |
 | `x11`, `wayland` | on | without the X11 or the Wayland display server |
 | `pulseaudio`, `alsa` | on | without PulseAudio or ALSA audio |
+| `module-<name>-enabled` | on (off for `mono`, `text_server_fb`) | without (or with) the module, for each of Godot's 57 modules: `module-gdscript-enabled`, `module-regex-enabled`, `module-svg-enabled`, ... |
+| `optimize-<level>` | off | `optimize=<level>`, for `none`, `debug`, `speed`, `speed-trace`, `size` and `size-extra` (at most one; otherwise Godot chooses from the target) |
 
 Set them for godot-sys in your `cabal.project`:
 
@@ -59,9 +61,11 @@ package godot-sys
   flags: +disable-3d +disable-physics-2d -vulkan
 ```
 
-The other SCons options (modules, `optimize`, `lto`, ...) can be passed with
-`GODOT_SYS_SCONS_FLAGS`. Each combination is a separate Godot build (and
-cache entry). [godot-low](../godot-low) only has bindings for the classes
+SCons's `modules_enabled_by_default=no` has no flag: a cabal flag always has
+a value, so godot-sys could not tell a module flag left on from one turned
+on. Turn off the modules you do not want instead. The other SCons options
+(`lto`, `precision`, ...) can be passed with `GODOT_SYS_SCONS_FLAGS`. Each
+combination is a separate Godot build (and cache entry). [godot-low](../godot-low) only has bindings for the classes
 the build has.
 
 ### What dependents get
@@ -109,8 +113,10 @@ Delete the directory to free its space (about 1.2 GB) or to force a rebuild;
 2. Run `scripts/update-extension-api.sh` and commit the new
    `extension_api.json`. The build refuses an `extension_api.json` whose
    version doesn't match `godotTag`.
-3. Check that the flags in `godot-sys.cabal` and `buildOptions` in
-   `Setup.hs` still match Godot's build options.
+3. Check that the flags in `godot-sys.cabal` and `buildOptions`,
+   `godotModules` and `optimizeLevels` in `Setup.hs` still match Godot's
+   build options. A build fails if `godotModules` names a module Godot no
+   longer has, and says which of its modules have no flag.
 
 ## extension_api.json
 

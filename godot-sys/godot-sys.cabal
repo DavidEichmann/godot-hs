@@ -15,9 +15,10 @@ description:
   * @release@ — build the @template_release@ target instead of @template_debug@.
   .
   * Godot's build options: a flag per option, named after it with @-@ for
-    @_@ and with the same default, e.g. @disable-3d@ for @disable_3d@ (off)
-    and @vulkan@ (on). The other options can be set through
-    @GODOT_SYS_SCONS_FLAGS@.
+    @_@ and with the same default, e.g. @disable-3d@ for @disable_3d@ (off),
+    @vulkan@ (on) and @module-gdscript-enabled@ (on); and a flag per value
+    of @optimize@, e.g. @optimize-size@ for @optimize=size@. The other
+    options can be set through @GODOT_SYS_SCONS_FLAGS@.
   .
   Environment variables (read at build time):
   .
@@ -140,6 +141,321 @@ flag pulseaudio
 
 flag alsa
   description: Build with ALSA (Godot's alsa build option).
+  default:     True
+  manual:      True
+
+flag optimize-none
+  description: Build with Godot's optimize=none build option (at most one optimize flag; with none, Godot chooses from the target).
+  default:     False
+  manual:      True
+
+flag optimize-debug
+  description: Build with Godot's optimize=debug build option (at most one optimize flag; with none, Godot chooses from the target).
+  default:     False
+  manual:      True
+
+flag optimize-speed
+  description: Build with Godot's optimize=speed build option (at most one optimize flag; with none, Godot chooses from the target).
+  default:     False
+  manual:      True
+
+flag optimize-speed-trace
+  description: Build with Godot's optimize=speed_trace build option (at most one optimize flag; with none, Godot chooses from the target).
+  default:     False
+  manual:      True
+
+flag optimize-size
+  description: Build with Godot's optimize=size build option (at most one optimize flag; with none, Godot chooses from the target).
+  default:     False
+  manual:      True
+
+flag optimize-size-extra
+  description: Build with Godot's optimize=size_extra build option (at most one optimize flag; with none, Godot chooses from the target).
+  default:     False
+  manual:      True
+
+flag module-astcenc-enabled
+  description: Build Godot's astcenc module (Godot's module_astcenc_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-basis-universal-enabled
+  description: Build Godot's basis_universal module (Godot's module_basis_universal_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-bcdec-enabled
+  description: Build Godot's bcdec module (Godot's module_bcdec_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-betsy-enabled
+  description: Build Godot's betsy module (Godot's module_betsy_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-bmp-enabled
+  description: Build Godot's bmp module (Godot's module_bmp_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-camera-enabled
+  description: Build Godot's camera module (Godot's module_camera_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-csg-enabled
+  description: Build Godot's csg module (Godot's module_csg_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-cvtt-enabled
+  description: Build Godot's cvtt module (Godot's module_cvtt_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-dds-enabled
+  description: Build Godot's dds module (Godot's module_dds_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-enet-enabled
+  description: Build Godot's enet module (Godot's module_enet_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-etcpak-enabled
+  description: Build Godot's etcpak module (Godot's module_etcpak_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-fbx-enabled
+  description: Build Godot's fbx module (Godot's module_fbx_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-freetype-enabled
+  description: Build Godot's freetype module (Godot's module_freetype_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-gdscript-enabled
+  description: Build Godot's gdscript module (Godot's module_gdscript_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-glslang-enabled
+  description: Build Godot's glslang module (Godot's module_glslang_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-gltf-enabled
+  description: Build Godot's gltf module (Godot's module_gltf_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-godot-physics-2d-enabled
+  description: Build Godot's godot_physics_2d module (Godot's module_godot_physics_2d_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-godot-physics-3d-enabled
+  description: Build Godot's godot_physics_3d module (Godot's module_godot_physics_3d_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-gridmap-enabled
+  description: Build Godot's gridmap module (Godot's module_gridmap_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-hdr-enabled
+  description: Build Godot's hdr module (Godot's module_hdr_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-interactive-music-enabled
+  description: Build Godot's interactive_music module (Godot's module_interactive_music_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-jolt-physics-enabled
+  description: Build Godot's jolt_physics module (Godot's module_jolt_physics_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-jpg-enabled
+  description: Build Godot's jpg module (Godot's module_jpg_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-jsonrpc-enabled
+  description: Build Godot's jsonrpc module (Godot's module_jsonrpc_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-ktx-enabled
+  description: Build Godot's ktx module (Godot's module_ktx_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-lightmapper-rd-enabled
+  description: Build Godot's lightmapper_rd module (Godot's module_lightmapper_rd_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-mbedtls-enabled
+  description: Build Godot's mbedtls module (Godot's module_mbedtls_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-meshoptimizer-enabled
+  description: Build Godot's meshoptimizer module (Godot's module_meshoptimizer_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-mobile-vr-enabled
+  description: Build Godot's mobile_vr module (Godot's module_mobile_vr_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-mono-enabled
+  description: Build Godot's mono module (Godot's module_mono_enabled build option).
+  default:     False
+  manual:      True
+
+flag module-mp3-enabled
+  description: Build Godot's mp3 module (Godot's module_mp3_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-msdfgen-enabled
+  description: Build Godot's msdfgen module (Godot's module_msdfgen_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-multiplayer-enabled
+  description: Build Godot's multiplayer module (Godot's module_multiplayer_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-navigation-2d-enabled
+  description: Build Godot's navigation_2d module (Godot's module_navigation_2d_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-navigation-3d-enabled
+  description: Build Godot's navigation_3d module (Godot's module_navigation_3d_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-noise-enabled
+  description: Build Godot's noise module (Godot's module_noise_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-objectdb-profiler-enabled
+  description: Build Godot's objectdb_profiler module (Godot's module_objectdb_profiler_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-ogg-enabled
+  description: Build Godot's ogg module (Godot's module_ogg_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-openxr-enabled
+  description: Build Godot's openxr module (Godot's module_openxr_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-raycast-enabled
+  description: Build Godot's raycast module (Godot's module_raycast_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-regex-enabled
+  description: Build Godot's regex module (Godot's module_regex_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-svg-enabled
+  description: Build Godot's svg module (Godot's module_svg_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-text-server-adv-enabled
+  description: Build Godot's text_server_adv module (Godot's module_text_server_adv_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-text-server-fb-enabled
+  description: Build Godot's text_server_fb module (Godot's module_text_server_fb_enabled build option).
+  default:     False
+  manual:      True
+
+flag module-tga-enabled
+  description: Build Godot's tga module (Godot's module_tga_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-theora-enabled
+  description: Build Godot's theora module (Godot's module_theora_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-tinyexr-enabled
+  description: Build Godot's tinyexr module (Godot's module_tinyexr_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-upnp-enabled
+  description: Build Godot's upnp module (Godot's module_upnp_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-vhacd-enabled
+  description: Build Godot's vhacd module (Godot's module_vhacd_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-visual-shader-enabled
+  description: Build Godot's visual_shader module (Godot's module_visual_shader_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-vorbis-enabled
+  description: Build Godot's vorbis module (Godot's module_vorbis_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-webp-enabled
+  description: Build Godot's webp module (Godot's module_webp_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-webrtc-enabled
+  description: Build Godot's webrtc module (Godot's module_webrtc_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-websocket-enabled
+  description: Build Godot's websocket module (Godot's module_websocket_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-webxr-enabled
+  description: Build Godot's webxr module (Godot's module_webxr_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-xatlas-unwrap-enabled
+  description: Build Godot's xatlas_unwrap module (Godot's module_xatlas_unwrap_enabled build option).
+  default:     True
+  manual:      True
+
+flag module-zip-enabled
+  description: Build Godot's zip module (Godot's module_zip_enabled build option).
   default:     True
   manual:      True
 
