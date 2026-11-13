@@ -43,10 +43,9 @@ category:           Game Engine, FFI
 build-type:         Custom
 extra-doc-files:    README.md
 extra-source-files:
-  build_option_classes.json
   extension_api.json
-  scripts/update-build-option-classes.py
   scripts/update-extension-api.sh
+  tools/list-classes.c
 tested-with:        GHC == 9.12.2
 
 source-repository head

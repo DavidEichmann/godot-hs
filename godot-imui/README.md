@@ -291,7 +291,7 @@ export GODOT_SYS_SCONS_FLAGS="optimize=size modules_enabled_by_default=no module
 
 (GDScript, regular expressions, audio formats, networking and the image
 formats other than PNG, JPEG, SVG and WebP are then gone.) With both, the
-example is 57 MB (37 MB stripped) instead of 120 MB. godot-sys's
+example is 55 MB (37 MB stripped) instead of 120 MB. godot-sys's
 `disable-advanced-gui` and `-opengl3` cannot be used: godot-imui's menus,
 trees, text areas and dialogs are Godot's advanced controls, and it renders
 with OpenGL. See [godot-sys](../godot-sys#build-options) for the options.

@@ -21,9 +21,9 @@
 --   Node3D, ...), their hierarchy, enums, constants and methods.
 -- * @Godot.Api.GlobalEnums@, @Godot.Api.Utility@: global enums and functions.
 --
--- Classes that the build options godot-sys built Godot with remove
--- (@disable_3d@, ...) are left out, using the SCons arguments and the table of
--- the classes each option removes that godot-sys installs alongside.
+-- Classes that the Godot godot-sys built does not have (because of its build
+-- options: @disable_3d@, modules, ...) are left out, using the list of its
+-- classes that godot-sys installs alongside.
 --
 -- The Godot.Api module list depends on the API, so configure adds it to the
 -- library (exposed + autogen modules), and the later steps set it again, in
@@ -41,6 +41,7 @@ import Data.List (intercalate, isPrefixOf, isSuffixOf, nub)
 import Data.String (fromString)
 import Distribution.PackageDescription (BuildInfo (..), Library (..), PackageDescription (..))
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Maybe (fromMaybe)
 import qualified Distribution.InstalledPackageInfo as IPI
 import Distribution.Simple
@@ -157,58 +158,19 @@ readExtApi path =
   either (fail . (("godot-low: cannot parse " ++ path ++ ": ") ++)) pure =<< eitherDecodeFileStrict path
 
 -- | godot-sys's @extension_api.json@, which describes a full Godot, with the
--- classes that the build options godot-sys built Godot with remove marked as
--- not in the engine. godot-sys installs, next to it, the arguments it ran
--- SCons with and which classes Godot's @disable_*@ build options remove.
+-- classes that the Godot godot-sys built does not have (because of its build
+-- options) marked as not in the engine. godot-sys asks the built Godot for
+-- its classes and installs the list next to extension_api.json.
 readEngineApi :: Verbosity -> LocalBuildInfo -> IO ExtApi
 readEngineApi verb lbi = do
   apiJson <- findGodotSysFile lbi "extension_api.json"
   info verb ("godot-low: generating Godot API bindings from " ++ apiJson)
   x <- readExtApi apiJson
-  args <- lines <$> (readFile =<< findGodotSysFile lbi "scons-arguments.txt")
-  optionsJson <- findGodotSysFile lbi "build_option_classes.json"
-  options <- either (fail . (("godot-low: cannot parse " ++ optionsJson ++ ": ") ++)) pure =<< eitherDecodeFileStrict optionsJson
-  let on = enabledOptions options args
-      removed = [c | (c, sets) <- Map.toList (boClasses options), any (all (`elem` on)) sets]
-  when (not (null on)) $
-    info verb ("godot-low: leaving out the classes that " ++ unwords on ++ " remove")
-  pure (withoutClasses removed x)
-
--- | Mark the given classes and their subclasses as not in the engine.
-withoutClasses :: [String] -> ExtApi -> ExtApi
-withoutClasses roots x = x {xClasses = [c {clInEngine = not (removed (clName c))} | c <- xClasses x]}
-  where
-    parents = Map.fromList [(clName c, clInherits c) | c <- xClasses x]
-    removed n = n `elem` roots || maybe False removed (Map.lookup n parents >>= id)
-
--- | godot-sys's @build_option_classes.json@.
-data BuildOptionClasses = BuildOptionClasses
-  { boImplies :: Map.Map String [String]
-  -- ^ build options that turn on others (@disable_3d@ turns on
-  -- @disable_physics_3d@, ...)
-  , boClasses :: Map.Map String [[String]]
-  -- ^ for each class a build option can remove, the sets of options that
-  -- remove it: it is removed when all the options of one set are on
-  }
-
-instance FromJSON BuildOptionClasses where
-  parseJSON = withObject "build_option_classes" $ \o ->
-    BuildOptionClasses <$> o .: "implies" <*> o .: "classes"
-
--- | The @disable_*@ build options that the given SCons arguments turn on,
--- with those they imply.
-enabledOptions :: BuildOptionClasses -> [String] -> [String]
-enabledOptions bo args = close [k | (k, v) <- Map.toList settings, sconsBool v == Just True]
-  where
-    -- As in SCons, a later argument overrides an earlier one.
-    settings = Map.fromList [(k, drop 1 v) | a <- args, let (k, v) = break (== '=') a, not (null v)]
-    sconsBool v
-      | map toLower v `elem` ["y", "yes", "t", "true", "1", "on", "all"] = Just True
-      | map toLower v `elem` ["n", "no", "f", "false", "0", "off", "none"] = Just False
-      | otherwise = Nothing
-    close os =
-      let os' = nub (os ++ concatMap (\o -> Map.findWithDefault [] o (boImplies bo)) os)
-       in if length os' == length os then os else close os'
+  classes <- Set.fromList . lines <$> (readFile =<< findGodotSysFile lbi "engine-classes.txt")
+  let x' = x {xClasses = [c {clInEngine = clName c `Set.member` classes} | c <- xClasses x]}
+      missing = [clName c | c <- xClasses x', clApiType c == "core", not (clInEngine c)]
+  info verb ("godot-low: leaving out " ++ show (length missing) ++ " classes that this Godot build does not have")
+  length missing `seq` pure x'
 
 -- | Set the generated Godot.Api modules of the library to those of the given
 -- API (replacing any set before).
@@ -815,7 +777,7 @@ data ApiClass = ApiClass
   , clBrief :: Maybe String
   , clDesc :: Maybe String
   , clInEngine :: Bool
-  -- ^ False for the classes that godot-sys's build options remove (see
+  -- ^ False for the classes the Godot godot-sys built does not have (see
   -- 'readEngineApi')
   }
 
@@ -937,8 +899,8 @@ data AEnv = AEnv
   , aSingletons :: [String]
   }
 
--- | Only the classes available in the engine godot-sys builds (no editor,
--- and none that its build options remove).
+-- | Only the classes available in the engine godot-sys builds (no editor
+-- classes, and none that its build options leave out).
 coreClasses :: ExtApi -> [ApiClass]
 coreClasses x = [c | c <- xClasses x, clApiType c == "core", clInEngine c]
 

@@ -10,11 +10,10 @@ the Godot version godot-sys pins:
   builtin types like `Vector3` and `String`, global enums, utility
   functions) → **`Godot.Api.*`**
 
-The bindings also follow the build options godot-sys built Godot with:
-the classes that its `disable-*` flags remove (`disable-3d` removes `Node3D`,
-`Mesh`, `World3D`, ...) are left out, so using one is a compile error rather
-than a failure at runtime. Classes of modules turned off through
-`GODOT_SYS_SCONS_FLAGS` are not left out.
+The bindings only cover the classes the Godot godot-sys built has (godot-sys
+asks it for them): classes that its build options leave out (`disable-3d`
+leaves out `Node3D`, `Mesh`, `World3D`, ...; disabled modules theirs) have no
+bindings, so using one is a compile error rather than a failure at runtime.
 
 ## Godot.Api: the engine API
 
@@ -37,7 +36,7 @@ r    <- Utility.sqrt 9                                -- 3.0
 | Module | Contents |
 |---|---|
 | `Godot.Api` | `initialize`, class/variant helpers, string conversions, `newCallable`; re-exports the types below |
-| `Godot.Api.Classes` | one newtype per engine class (954 non-editor classes, fewer with godot-sys's `disable-*` flags), the `Inherits` hierarchy, class enums (`Node_ProcessMode`, patterns `Node_PROCESS_MODE_INHERIT`, …) |
+| `Godot.Api.Classes` | one newtype per engine class (953 with godot-sys's default build options, fewer with fewer features), the `Inherits` hierarchy, class enums (`Node_ProcessMode`, patterns `Node_PROCESS_MODE_INHERIT`, …) |
 | `Godot.Api.Class.<Name>` | that class's methods (`Node.getChild`, …), constants (`Node.NOTIFICATION_READY`), `construct` / `singleton` where applicable |
 | `Godot.Api.Builtin.Types` | builtin types: value types with a known layout are records (`Vector3 {vector3_x, …}`, `Color`, `Transform3D`, …); others are opaque, garbage-collected handles (`GString` for Godot's `String`, `StringName`, `Array`, `Dictionary`, …) |
 | `Godot.Api.Builtin.<Name>` | constructors (`new`, `newFromFloatFloatFloat`, …), methods and operators (`opAddVector3`, …) of that builtin |

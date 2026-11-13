@@ -53,7 +53,7 @@ import Distribution.Verbosity (Verbosity, normal)
 import GHC.Conc (getNumProcessors)
 import GHC.IO.Handle.Lock (LockMode (..), hLock, hTryLock)
 import System.Directory
-import System.Environment (lookupEnv)
+import System.Environment (getEnvironment, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath
 import System.IO (IOMode (..), withFile)
@@ -143,10 +143,10 @@ libFileName :: LibKind -> FilePath
 libFileName Static = "libgodot.a"
 libFileName Shared = "libgodot.so"
 
--- | Installed next to the headers: the arguments SCons was run with (other
--- than @-j@), one per line, including those from @GODOT_SYS_SCONS_FLAGS@.
-sconsArgumentsFile :: FilePath
-sconsArgumentsFile = "scons-arguments.txt"
+-- | Installed next to the headers: the classes the built Godot has, one per
+-- line (see 'listClasses').
+engineClassesFile :: FilePath
+engineClassesFile = "engine-classes.txt"
 
 -- | System libraries a static libgodot needs when linking the final program.
 -- (X11, Wayland, Vulkan, GL, audio etc. are dlopen'ed by Godot at runtime.)
@@ -287,6 +287,7 @@ buildGodot verb lbi = do
       src <- makeAbsolute dir
       let out = bdir </> "godot-sys-out"
       sconsBuild verb src cfg (sconsArgs ++ [jobsArg]) out
+      listClasses verb lbi cfg out
       pure out
     Nothing -> do
       cache <- cacheDir
@@ -304,6 +305,9 @@ buildGodot verb lbi = do
             removeIfExists out
             sconsBuild verb src cfg (sconsArgs ++ [jobsArg]) out
             writeFile complete (unlines sconsArgs)
+        -- (Also for a build cached before godot-sys listed the classes.)
+        listed <- doesFileExist (out </> "include" </> engineClassesFile)
+        unless listed $ listClasses verb lbi cfg out
       -- The source tree used to live in each build directory.
       removeIfExists (bdir </> ("godot-" ++ godotTag))
       removeIfExists (bdir </> ("godot-" ++ godotTag ++ ".tar.xz"))
@@ -318,10 +322,6 @@ buildGodot verb lbi = do
   copyTree (out </> "include") (bdir </> "include")
   info verb ("godot-sys: staged " ++ staged)
   stageExtensionApi lbi (bdir </> "include")
-  stageBuildOptionClasses lbi (bdir </> "include")
-  -- What Godot was built with, for dependents: godot-low leaves out the
-  -- classes that the build options remove.
-  writeFile (bdir </> "include" </> sconsArgumentsFile) (unlines sconsArgs)
   where
     toLowerKind c = if c >= 'A' && c <= 'Z' then toEnum (fromEnum c + 32) else c
 
@@ -353,6 +353,48 @@ sconsBuild verb src cfg sconsArgs out = do
       archives <- (built :) . filter (suffix `isSuffixOf`) <$> findArchives (src </> "bin" </> "obj")
       mergeArchives verb out archives lib
   stageHeaders src (out </> "include")
+
+-- | Ask the built Godot which classes it has, and write them to
+-- 'engineClassesFile' in @out/include@, where they are staged and installed
+-- with the headers. extension_api.json describes a full Godot, but build
+-- options (@disable_3d@, modules, ...) leave classes out; godot-low only
+-- generates bindings for the classes listed.
+--
+-- This links tools/list-classes.c with the library and runs it: it starts
+-- Godot headless, in a minimal project and with the XDG directories (where
+-- Godot keeps logs and settings) in a temporary directory, and writes
+-- ClassDB.get_class_list.
+listClasses :: Verbosity -> LocalBuildInfo -> GodotConfig -> FilePath -> IO ()
+listClasses verb lbi cfg out = do
+  notice verb "godot-sys: listing the classes of the built Godot"
+  tool <- makeAbsolute (interpretSymbolicPathLBI lbi (makeSymbolicPath ("tools" </> "list-classes.c")))
+  let work = out </> "list-classes"
+      project = work </> "project"
+      exe = work </> "list-classes"
+      lib = out </> libFileName (gcKind cfg)
+  removeIfExists work
+  createDirectoryIfMissing True project
+  writeFile (project </> "project.godot") $
+    unlines ["config_version=5", "", "[application]", "run/main_scene=\"res://main.tscn\""]
+  writeFile (project </> "main.tscn") $
+    unlines ["[gd_scene format=3]", "", "[node name=\"Main\" type=\"Node\"]"]
+  run work "cc" ["-c", "-I", out </> "include", tool, "-o", exe <.> "o"]
+  run work "c++" $
+    [exe <.> "o", "-o", exe]
+      ++ case gcKind cfg of
+        Static -> lib : map ("-l" ++) staticSystemLibs
+        Shared -> [lib, "-Wl,-rpath," ++ out]
+  env <- getEnvironment
+  let xdg = [(v, work </> d) | (v, d) <- [("XDG_DATA_HOME", "data"), ("XDG_CONFIG_HOME", "config"), ("XDG_CACHE_HOME", "cache")]]
+      classes = out </> "include" </> engineClassesFile
+  (code, stdout', stderr') <-
+    readCreateProcessWithExitCode
+      (proc exe [project, classes <.> "tmp"]) {cwd = Just work, env = Just (xdg ++ filter ((`notElem` map fst xdg) . fst) env)}
+      ""
+  unless (code == ExitSuccess) $
+    failWith ("listing the classes of the built Godot failed (" ++ show code ++ "):\n" ++ stdout' ++ stderr')
+  renameFile (classes <.> "tmp") classes
+  removeIfExists work
 
 -- | Where the Godot source, SCons objects and finished libraries are kept:
 -- @$GODOT_SYS_CACHE_DIR@, or @~/.cache/godot-sys@.
@@ -506,23 +548,6 @@ stageExtensionApi lbi inc = do
         ++ godotTag
         ++ "; run scripts/update-extension-api.sh"
   length header `seq` copyFile src (inc </> "extension_api.json")
-
--- | Put the vendored @build_option_classes.json@ (the classes that Godot's
--- @disable_*@ build options remove, generated by
--- scripts/update-build-option-classes.py) next to the headers, after checking
--- it was generated from the pinned Godot version.
-stageBuildOptionClasses :: LocalBuildInfo -> FilePath -> IO ()
-stageBuildOptionClasses lbi inc = do
-  let src = interpretSymbolicPathLBI lbi (makeSymbolicPath "build_option_classes.json")
-      expected = "\"godot_version\": \"" ++ godotTag ++ "\""
-  header <- take 4096 <$> readFile src
-  unless (expected `isInfixOf` header) $
-    failWith $
-      src
-        ++ " was not generated from Godot "
-        ++ godotTag
-        ++ "; run scripts/update-build-option-classes.py"
-  length header `seq` copyFile src (inc </> "build_option_classes.json")
 
 --------------------------------------------------------------------------------
 -- Installing

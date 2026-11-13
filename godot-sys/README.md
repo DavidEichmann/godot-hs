@@ -61,8 +61,8 @@ package godot-sys
 
 The other SCons options (modules, `optimize`, `lto`, ...) can be passed with
 `GODOT_SYS_SCONS_FLAGS`. Each combination is a separate Godot build (and
-cache entry). [godot-low](../godot-low) leaves out the bindings of the
-classes the `disable-*` flags remove.
+cache entry). [godot-low](../godot-low) only has bindings for the classes
+the build has.
 
 ### What dependents get
 
@@ -71,9 +71,8 @@ Depending on `godot-sys` gives your package:
 - `-lgodot` (plus `stdc++`, `m`, `pthread`, `dl`, `rt`, `atomic` when static),
 - `libgodot.h`, `core/extension/gdextension_interface.gen.h`,
   `gdextension_interface.json` and `extension_api.json` (the engine class
-  API) on the include path, with `scons-arguments.txt` (the arguments SCons
-  was run with, one per line) and `build_option_classes.json` (which classes
-  each `disable_*` build option removes),
+  API) on the include path, with `engine-classes.txt`: the classes this
+  Godot build has, one per line (extension_api.json describes a full Godot),
 - the `Godot.Sys` module with `libgodotCreateGodotInstance` and
   `libgodotDestroyGodotInstance`.
 
@@ -110,11 +109,7 @@ Delete the directory to free its space (about 1.2 GB) or to force a rebuild;
 2. Run `scripts/update-extension-api.sh` and commit the new
    `extension_api.json`. The build refuses an `extension_api.json` whose
    version doesn't match `godotTag`.
-3. Run `scripts/update-build-option-classes.py` and commit the new
-   `build_option_classes.json` (same check). It reads Godot's source for the
-   classes each `disable_*` option removes: the `#ifndef ..._DISABLED` blocks
-   around class registrations, and modules that are not built with an option.
-4. Check that the flags in `godot-sys.cabal` and `buildOptions` in
+3. Check that the flags in `godot-sys.cabal` and `buildOptions` in
    `Setup.hs` still match Godot's build options.
 
 ## extension_api.json
@@ -144,6 +139,13 @@ tree.
    keeps `--path` / `--main-pack` working so the host can point Godot at its
    project (later `GODOT_SYS_SCONS_FLAGS` values override it). For static builds, the
    per-subsystem archives SCons produces are merged into one `libgodot.a`.
+   Then it links [tools/list-classes.c](tools/list-classes.c) with the
+   library and runs it: it starts Godot headless (with its XDG directories
+   in a temporary directory) and writes `ClassDB.get_class_list` to
+   `engine-classes.txt`, which is cached and installed with the headers.
+   That takes a few seconds (minutes with `lto=full`, for the link), once per
+   Godot build. It needs a C compiler (`cc`, `c++`), which Godot's build does
+   too.
 3. **copy/install** copies the library and headers next to the installed
    Haskell library.
 
