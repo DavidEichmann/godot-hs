@@ -8,3 +8,23 @@ tests: True
 -- godot-low has ~1000 generated modules; compile them in parallel.
 package godot-low
   ghc-options: -j
+
+-- Optimize godot-sys for size, and disable all modules that are not needed for ImUI.
+package godot-sys
+  flags:
+    +release +optimize-size
+    +disable-3d +disable-physics-2d +disable-navigation-2d -vulkan -sdl
+    -module-astcenc-enabled -module-basis-universal-enabled
+    -module-bcdec-enabled -module-betsy-enabled -module-bmp-enabled
+    -module-camera-enabled -module-cvtt-enabled -module-dds-enabled
+    -module-enet-enabled -module-etcpak-enabled -module-gdscript-enabled
+    -module-glslang-enabled -module-hdr-enabled
+    -module-interactive-music-enabled -module-jsonrpc-enabled
+    -module-ktx-enabled -module-lightmapper-rd-enabled -module-mbedtls-enabled
+    -module-mp3-enabled -module-msdfgen-enabled -module-multiplayer-enabled
+    -module-noise-enabled -module-objectdb-profiler-enabled -module-ogg-enabled
+    -module-raycast-enabled -module-regex-enabled -module-tga-enabled
+    -module-theora-enabled -module-tinyexr-enabled -module-upnp-enabled
+    -module-visual-shader-enabled -module-vorbis-enabled
+    -module-webrtc-enabled -module-websocket-enabled
+    -module-xatlas-unwrap-enabled -module-zip-enabled
