@@ -18,34 +18,34 @@ import Control.Monad (filterM, forM_, unless, when)
 import Data.Char (isSpace)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import Distribution.PackageDescription
-  ( BuildInfo (..)
-  , GenericPackageDescription
-  , HookedBuildInfo
-  , Library (..)
-  , PackageDescription (..)
-  , lookupFlagAssignment
-  , mkFlagName
+  ( BuildInfo (..),
+    GenericPackageDescription,
+    HookedBuildInfo,
+    Library (..),
+    PackageDescription (..),
+    lookupFlagAssignment,
+    mkFlagName,
   )
 import Distribution.Simple
 import Distribution.Simple.InstallDirs (CopyDest (..), InstallDirs (..))
 import Distribution.Simple.LocalBuildInfo
-  ( LocalBuildInfo (..)
-  , absoluteInstallDirs
-  , buildDir
-  , interpretSymbolicPathLBI
+  ( LocalBuildInfo (..),
+    absoluteInstallDirs,
+    buildDir,
+    interpretSymbolicPathLBI,
   )
 import Distribution.Simple.Setup
-  ( BuildFlags
-  , ConfigFlags
-  , CopyFlags
-  , InstallFlags
-  , RegisterFlags
-  , buildVerbosity
-  , copyDest
-  , copyVerbosity
-  , fromFlagOrDefault
-  , installVerbosity
-  , regInPlace
+  ( BuildFlags,
+    ConfigFlags,
+    CopyFlags,
+    InstallFlags,
+    RegisterFlags,
+    buildVerbosity,
+    copyDest,
+    copyVerbosity,
+    fromFlagOrDefault,
+    installVerbosity,
+    regInPlace,
   )
 import Distribution.Simple.Utils (info, notice)
 import Distribution.Utils.Path (getSymbolicPath, makeSymbolicPath)
@@ -69,7 +69,10 @@ godotTag = "4.7.2-stable"
 godotUrl :: String
 godotUrl =
   "https://github.com/godotengine/godot-builds/releases/download/"
-    ++ godotTag ++ "/godot-" ++ godotTag ++ ".tar.xz"
+    ++ godotTag
+    ++ "/godot-"
+    ++ godotTag
+    ++ ".tar.xz"
 
 -- | SHA-256 of 'godotUrl' (matches the upstream @.tar.xz.sha256@ file).
 godotSha256 :: String
@@ -81,15 +84,16 @@ godotSha256 = "a18ce0ccec3ecc40b0dd6c4f5132ca934e9fb7c2979717940ff32aee1eb35481"
 data LibKind = Static | Shared deriving (Eq, Show)
 
 data GodotConfig = GodotConfig
-  { gcKind   :: LibKind
-  , gcTarget :: String -- ^ SCons @target=@
+  { gcKind :: LibKind,
+    -- | SCons @target=@
+    gcTarget :: String
   }
 
 godotConfig :: LocalBuildInfo -> GodotConfig
 godotConfig lbi =
   GodotConfig
-    { gcKind   = if flag "shared" then Shared else Static
-    , gcTarget = if flag "release" then "template_release" else "template_debug"
+    { gcKind = if flag "shared" then Shared else Static,
+      gcTarget = if flag "release" then "template_release" else "template_debug"
     }
   where
     flag n = lookupFlagAssignment (mkFlagName n) (flagAssignment lbi) == Just True
@@ -113,15 +117,15 @@ main :: IO ()
 main =
   defaultMainWithHooks
     simpleUserHooks
-      { confHook  = godotConfHook
-      , buildHook = godotBuildHook
-      , copyHook  = godotCopyHook
-      , instHook  = godotInstHook
-      , regHook   = godotRegHook
+      { confHook = godotConfHook,
+        buildHook = godotBuildHook,
+        copyHook = godotCopyHook,
+        instHook = godotInstHook,
+        regHook = godotRegHook
       }
 
-godotConfHook
-  :: (GenericPackageDescription, HookedBuildInfo) -> ConfigFlags -> IO LocalBuildInfo
+godotConfHook ::
+  (GenericPackageDescription, HookedBuildInfo) -> ConfigFlags -> IO LocalBuildInfo
 godotConfHook args flags = do
   lbi <- confHook simpleUserHooks args flags
   bdir <- absBuildDir lbi
@@ -132,12 +136,15 @@ godotConfHook args flags = do
       incDirs = [bdir </> "include", includedir inst]
       addGodot bi =
         bi
-          { extraLibs = extraLibs bi ++ ["godot"] ++
-              (if gcKind cfg == Static then staticSystemLibs else [])
-          , extraLibDirs = extraLibDirs bi ++ map makeSymbolicPath libDirs
-          , includeDirs = includeDirs bi ++ map makeSymbolicPath incDirs
-          , ldOptions = ldOptions bi ++
-              (if gcKind cfg == Shared then ["-Wl,-rpath," ++ d | d <- libDirs] else [])
+          { extraLibs =
+              extraLibs bi
+                ++ ["godot"]
+                ++ (if gcKind cfg == Static then staticSystemLibs else []),
+            extraLibDirs = extraLibDirs bi ++ map makeSymbolicPath libDirs,
+            includeDirs = includeDirs bi ++ map makeSymbolicPath incDirs,
+            ldOptions =
+              ldOptions bi
+                ++ (if gcKind cfg == Shared then ["-Wl,-rpath," ++ d | d <- libDirs] else [])
           }
       pkg' =
         pkg
@@ -190,9 +197,9 @@ withoutBuildDirPaths lbi =
       keepOpt o = not ("-Wl,-rpath," `isPrefixOf` o) || o == "-Wl,-rpath," ++ libdir inst
       strip bi =
         bi
-          { extraLibDirs = filter keepDir (extraLibDirs bi)
-          , includeDirs = filter keepDir (includeDirs bi)
-          , ldOptions = filter keepOpt (ldOptions bi)
+          { extraLibDirs = filter keepDir (extraLibDirs bi),
+            includeDirs = filter keepDir (includeDirs bi),
+            ldOptions = filter keepOpt (ldOptions bi)
           }
    in lbi
         { localPkgDescr =
@@ -210,16 +217,16 @@ buildGodot verb lbi = do
   jobs <- maybe (show <$> getNumProcessors) pure =<< lookupEnv "GODOT_SYS_JOBS"
   extra <- maybe [] words <$> lookupEnv "GODOT_SYS_SCONS_FLAGS"
   let sconsArgs =
-        [ "platform=linuxbsd"
-        , "target=" ++ gcTarget cfg
-        , "library_type=" ++ (if gcKind cfg == Static then "static_library" else "shared_library")
+        [ "platform=linuxbsd",
+          "target=" ++ gcTarget cfg,
+          "library_type=" ++ (if gcKind cfg == Static then "static_library" else "shared_library"),
           -- Position independent code so the static archive can be linked
           -- into PIE executables and shared Haskell libraries.
-        , "ccflags=-fPIC"
+          "ccflags=-fPIC",
           -- An embedding host must be able to say where its project / main
           -- pack lives (--path, --main-pack); export templates disable that
           -- by default. Can be turned back on via GODOT_SYS_SCONS_FLAGS.
-        , "disable_path_overrides=no"
+          "disable_path_overrides=no"
         ]
           ++ extra
       jobsArg = "-j" ++ jobs
@@ -272,6 +279,13 @@ buildGodot verb lbi = do
 sconsBuild :: Verbosity -> FilePath -> GodotConfig -> [String] -> FilePath -> IO ()
 sconsBuild verb src cfg sconsArgs out = do
   notice verb ("godot-sys: building Godot " ++ godotTag ++ " (" ++ unwords sconsArgs ++ ")")
+  -- The merge below takes every archive of this target in bin/obj, but SCons
+  -- leaves those of an earlier configuration there (e.g. modules it enabled
+  -- and this one disables), which then add dead weight or clash. Remove
+  -- them, so that SCons archives just this configuration's (from the
+  -- objects it kept, which is quick).
+  let ofTarget f = (".linuxbsd." ++ gcTarget cfg ++ ".") `isInfixOf` takeFileName f
+  mapM_ removeFile . filter ofTarget =<< findArchives (src </> "bin" </> "obj")
   run src "scons" sconsArgs
   built <- findGodotOutput src cfg
   createDirectoryIfMissing True out
@@ -417,9 +431,9 @@ stageHeaders :: FilePath -> FilePath -> IO ()
 stageHeaders src inc = do
   let ext = "core" </> "extension"
       files =
-        [ (ext </> "libgodot.h", "libgodot.h")
-        , (ext </> "gdextension_interface.gen.h", ext </> "gdextension_interface.gen.h")
-        , (ext </> "gdextension_interface.json", "gdextension_interface.json")
+        [ (ext </> "libgodot.h", "libgodot.h"),
+          (ext </> "gdextension_interface.gen.h", ext </> "gdextension_interface.gen.h"),
+          (ext </> "gdextension_interface.json", "gdextension_interface.json")
         ]
   forM_ files $ \(from, to) -> do
     createDirectoryIfMissing True (takeDirectory (inc </> to))
@@ -436,7 +450,9 @@ stageExtensionApi lbi inc = do
   header <- take 4096 <$> readFile src
   unless (expected `isInfixOf` header) $
     failWith $
-      src ++ " was not generated from Godot " ++ godotTag
+      src
+        ++ " was not generated from Godot "
+        ++ godotTag
         ++ "; run scripts/update-extension-api.sh"
   length header `seq` copyFile src (inc </> "extension_api.json")
 
