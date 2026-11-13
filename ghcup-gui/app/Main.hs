@@ -12,7 +12,7 @@ main :: IO ()
 main = do
   logBuf <- newLogBuffer
   restart <- newIORef False
-  runUI defaultWindow {windowTitle = "GHCup", windowSize = (1000, 680)} (app logBuf (writeIORef restart True))
+  runUI defaultWindow {windowTitle = "GHCup", windowSize = (1100, 680)} (app logBuf (writeIORef restart True))
   -- Restarting: once the window is closed and Godot has shut down (Godot
   -- cannot be started twice in a process), run this program again.
   again <- readIORef restart
