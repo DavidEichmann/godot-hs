@@ -5,7 +5,9 @@
 -- bindings.
 module Main (main) where
 
+import Control.Exception (IOException, try)
 import Control.Monad (unless)
+import Data.List (isPrefixOf)
 import Foreign.C.String (peekCString)
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Storable (peek)
@@ -20,6 +22,7 @@ import qualified Godot.Api.Class.Object as Object
 import qualified Godot.Api.Class.SceneTree as SceneTree
 import qualified Godot.Api.Utility as Utility
 import qualified Godot.GDExtension as GDE
+import System.Directory (getTemporaryDirectory, listDirectory)
 import System.Exit (exitFailure)
 
 check :: String -> Bool -> IO ()
@@ -28,7 +31,20 @@ check what ok = do
   unless ok exitFailure
 
 main :: IO ()
-main = withGodot defaultProject ["--headless"] $ \inst -> do
+main = do
+  -- A project that cannot be written (main.tscn is a file): withGodot fails
+  -- before starting Godot, and leaves no project behind.
+  tmp <- getTemporaryDirectory
+  let projects = fmap (filter ("godot-low-test-godot-" `isPrefixOf`)) (listDirectory tmp)
+  before <- projects
+  failed <- try (withGodot defaultProject {projectFiles = [("main.tscn/x", "")]} [] (\_ -> pure ()))
+  after <- projects
+  check "withGodot: a project that cannot be written fails" (either (const True) (const False) (failed :: Either IOException ()))
+  check "withGodot: the project is removed when it fails" (after == before)
+  run
+
+run :: IO ()
+run = withGodot defaultProject ["--headless"] $ \inst -> do
   -- Low level: the GDExtension interface directly.
   iface <- getInterface
   v <- alloca $ \pv -> GDE.get_godot_version2 iface pv >> peek pv

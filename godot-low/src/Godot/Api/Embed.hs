@@ -16,7 +16,7 @@ module Godot.Api.Embed
   , defaultProject
   ) where
 
-import Control.Exception (finally, throwIO, try)
+import Control.Exception (bracket, finally, throwIO, try)
 import Control.Monad (unless, when)
 import Data.IORef
 import Foreign.Ptr (freeHaskellFunPtr, nullPtr)
@@ -58,55 +58,58 @@ defaultProject = Project [] []
 -- to the project's), so relative paths keep meaning what they did.
 --
 -- Call it from the main thread, and only once per process: Godot cannot be
--- started again (and a second call fails).
+-- started again (and a second call fails, unless the first failed before
+-- creating the instance). The project is removed however it ends.
 withGodot :: Project -> [String] -> (GodotInstance -> IO a) -> IO a
 withGodot project args body = do
-  again <- atomicModifyIORef' alreadyRun (\r -> (True, r))
-  when again $ fail "Godot.Api.Embed.withGodot: Godot can only be started once per process"
+  ran <- readIORef alreadyRun
+  when ran $ fail "Godot.Api.Embed.withGodot: Godot can only be started once per process"
   progName <- getProgName
-  dir <- writeProject project
   cwd <- getCurrentDirectory
-  -- Godot calls this while creating the instance. Nothing is registered:
-  -- only the GDExtension interface is needed.
-  onLevel <- GDE.wrapGDExtensionInitializeCallback $ \_ _ -> pure ()
-  initFn <- GDE.wrapGDExtensionInitializationFunction $ \gpa library rInit -> do
-    _ <- initialize gpa library
-    poke
-      rInit
-      GDE.GDExtensionInitialization
-        { GDE.gdExtensionInitialization_minimum_initialization_level = GDE.GDEXTENSION_INITIALIZATION_CORE
-        , GDE.gdExtensionInitialization_userdata = nullPtr
-        , GDE.gdExtensionInitialization_initialize = onLevel
-        , GDE.gdExtensionInitialization_deinitialize = onLevel
-        }
-    pure 1
-  ( GDE.withGodotArgs ([progName, "--path", dir] ++ args) $ \argc argv -> do
+  -- Each resource is released however the rest ends, in reverse order: the
+  -- instance, the callbacks, the working directory (which Godot changes to
+  -- the project), and last the project.
+  bracket freshDirectory removeDirectoryRecursive $ \dir ->
+    (`finally` setCurrentDirectory cwd) $ do
+      writeProject dir project
+      -- Godot calls this while creating the instance. Nothing is registered:
+      -- only the GDExtension interface is needed.
+      bracket (GDE.wrapGDExtensionInitializeCallback (\_ _ -> pure ())) freeHaskellFunPtr $ \onLevel ->
+        bracket (GDE.wrapGDExtensionInitializationFunction (initialization onLevel)) freeHaskellFunPtr $ \initFn ->
+          GDE.withGodotArgs ([progName, "--path", dir] ++ args) $ \argc argv ->
+            bracket (create argc argv initFn) GDE.destroyGodotInstance $ \instPtr -> do
+              let inst = unsafeFromObjectPtr @GodotInstance instPtr
+              started <- GodotInstance.start inst
+              unless started $ fail "Godot.Api.Embed.withGodot: could not start Godot"
+              setCurrentDirectory cwd
+              body inst
+  where
+    initialization onLevel gpa library rInit = do
+      _ <- initialize gpa library
+      poke
+        rInit
+        GDE.GDExtensionInitialization
+          { GDE.gdExtensionInitialization_minimum_initialization_level = GDE.GDEXTENSION_INITIALIZATION_CORE
+          , GDE.gdExtensionInitialization_userdata = nullPtr
+          , GDE.gdExtensionInitialization_initialize = onLevel
+          , GDE.gdExtensionInitialization_deinitialize = onLevel
+          }
+      pure 1
+    create argc argv initFn = do
+      writeIORef alreadyRun True
       instPtr <- GDE.createGodotInstance argc argv initFn
       when (instPtr == GDE.GDExtensionObjectPtr nullPtr) $
         fail "Godot.Api.Embed.withGodot: could not create the Godot instance"
-      ( do
-          let inst = unsafeFromObjectPtr @GodotInstance instPtr
-          started <- GodotInstance.start inst
-          unless started $ fail "Godot.Api.Embed.withGodot: could not start Godot"
-          setCurrentDirectory cwd
-          body inst
-        )
-        `finally` GDE.destroyGodotInstance instPtr
-    )
-    `finally` do
-      setCurrentDirectory cwd
-      removeDirectoryRecursive dir
-      freeHaskellFunPtr initFn
-      freeHaskellFunPtr onLevel
+      pure instPtr
 
 -- | Godot cannot be restarted: "Godot.Api" caches pointers into the engine.
 alreadyRun :: IORef Bool
 alreadyRun = unsafePerformIO (newIORef False)
 {-# NOINLINE alreadyRun #-}
 
--- | Write the project to a fresh temporary directory.
-writeProject :: Project -> IO FilePath
-writeProject project = do
+-- | Create a fresh, empty temporary directory for the project.
+freshDirectory :: IO FilePath
+freshDirectory = do
   tmp <- getTemporaryDirectory
   progName <- getProgName
   let fresh = do
@@ -118,7 +121,11 @@ writeProject project = do
           Left e
             | isAlreadyExistsError e -> fresh
             | otherwise -> throwIO e
-  dir <- fresh
+  fresh
+
+-- | Write the project into a directory.
+writeProject :: FilePath -> Project -> IO ()
+writeProject dir project = do
   writeFile (dir </> "project.godot") . unlines $
     ["config_version=5", "", "[application]", "run/main_scene=\"res://main.tscn\""]
       ++ projectSettings project
@@ -133,4 +140,3 @@ writeProject project = do
         writeFile (dir </> path) contents
     )
     (projectFiles project)
-  pure dir
